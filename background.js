@@ -568,3 +568,187 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     console.warn('[TGM ctx] Could not inject toast on this page.');
   });
 });
+
+// ═══════════════════════════════════════════════════════
+// NOTION SYNC — background.js
+// Push tab groups to a Notion database (debounced, push-only)
+// ═══════════════════════════════════════════════════════
+
+const NOTION_API     = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2022-06-28';
+
+function _notionHeaders(token) {
+  return {
+    'Authorization':  `Bearer ${token}`,
+    'Notion-Version': NOTION_VERSION,
+    'Content-Type':   'application/json',
+  };
+}
+
+// Query all pages in the database (up to 100) to detect name conflicts
+async function _notionQueryDb(token, dbId) {
+  const resp = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
+    method:  'POST',
+    headers: _notionHeaders(token),
+    body:    JSON.stringify({ page_size: 100 }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Notion DB query failed (${resp.status}): ${body}`);
+  }
+  return resp.json();
+}
+
+// Create one database page (row) for a group
+async function _notionCreatePage(token, dbId, group, tabCount, nameSuffix) {
+  const title = (group.name || 'Unnamed') + (nameSuffix || '');
+  const body = {
+    parent:     { database_id: dbId },
+    properties: {
+      'Name':  { title:    [{ text: { content: title.slice(0, 2000) } }] },
+      'Color': { rich_text:[{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
+      'Tabs':  { number:   tabCount },
+    },
+  };
+  const resp = await fetch(`${NOTION_API}/pages`, {
+    method:  'POST',
+    headers: _notionHeaders(token),
+    body:    JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`Notion create page failed (${resp.status}): ${errBody}`);
+  }
+  return resp.json();
+}
+
+// Append saved tabs as bullet blocks to a Notion page body
+async function _notionAppendTabs(token, pageId, tabs) {
+  if (!tabs || tabs.length === 0) return;
+
+  const children = tabs.map(t => ({
+    object: 'block',
+    type:   'bulleted_list_item',
+    bulleted_list_item: {
+      rich_text: [
+        {
+          type: 'text',
+          text: {
+            content: ((t.title || t.url || 'Untitled') + ' — ').slice(0, 400),
+          },
+        },
+        {
+          type: 'text',
+          text: {
+            content: (t.url || '').slice(0, 2000),
+            link:    t.url ? { url: t.url.slice(0, 2000) } : undefined,
+          },
+        },
+      ],
+    },
+  }));
+
+  // Notion limits: 100 blocks per PATCH request
+  for (let i = 0; i < children.length; i += 100) {
+    const chunk = children.slice(i, i + 100);
+    const resp = await fetch(`${NOTION_API}/blocks/${pageId}/children`, {
+      method:  'PATCH',
+      headers: _notionHeaders(token),
+      body:    JSON.stringify({ children: chunk }),
+    });
+    if (!resp.ok) {
+      console.warn('[TGM Notion] append blocks failed:', resp.status, await resp.text());
+    }
+  }
+}
+
+// ── Main sync: push all groups to Notion ──
+async function notionSyncAllGroups() {
+  const r = await chrome.storage.local.get([
+    'notion_token', 'notion_db_id', 'notion_sync_enabled', 'ntp_state',
+  ]).catch(() => ({}));
+
+  // Abort if sync is disabled
+  if (!r.notion_sync_enabled) return { ok: true, count: 0, skipped: true };
+
+  const token  = (r.notion_token || '').trim();
+  const dbId   = (r.notion_db_id || '').replace(/-/g, '').trim();
+  const groups = (r.ntp_state && Array.isArray(r.ntp_state.tabGroups))
+    ? r.ntp_state.tabGroups
+    : [];
+
+  if (!token || !dbId) {
+    return { ok: false, error: 'Notion token or Database ID not configured.' };
+  }
+  if (groups.length === 0) {
+    return { ok: true, count: 0 };
+  }
+
+  // Fetch existing page names so we can detect conflicts
+  let existingNames = new Set();
+  try {
+    const existing = await _notionQueryDb(token, dbId);
+    for (const page of (existing.results || [])) {
+      try {
+        const raw = page.properties.Name.title[0].text.content;
+        if (raw) existingNames.add(raw.toLowerCase());
+      } catch (_) {}
+    }
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+
+  let synced = 0;
+  for (const group of groups) {
+    try {
+      const baseName   = (group.name || 'Unnamed').toLowerCase();
+      const nameSuffix = existingNames.has(baseName) ? ' New' : '';
+      const tabs       = group.tabs || [];
+
+      const page = await _notionCreatePage(token, dbId, group, tabs.length, nameSuffix);
+      await _notionAppendTabs(token, page.id, tabs);
+
+      // Register the newly created name so subsequent groups in this batch
+      // don't collide with each other either
+      existingNames.add((group.name || 'Unnamed').toLowerCase() + nameSuffix.toLowerCase());
+      synced++;
+    } catch (err) {
+      console.warn('[TGM Notion] sync error for group:', group.name, err);
+    }
+  }
+
+  return { ok: true, count: synced };
+}
+
+// ── Debounced auto-sync: fires 3 s after the last state change ──
+let _notionDebounceTimer = null;
+function _scheduleNotionSync() {
+  clearTimeout(_notionDebounceTimer);
+  _notionDebounceTimer = setTimeout(() => {
+    notionSyncAllGroups()
+      .then(r => {
+        if (r && r.ok && !r.skipped && r.count > 0) {
+          console.log(`[TGM Notion] Auto-sync: ${r.count} group(s) pushed.`);
+        }
+      })
+      .catch(err => console.warn('[TGM Notion] Auto-sync error:', err));
+  }, 3000);
+}
+
+// Hook into the existing storage.onChanged listener flow
+// (We add a SECOND storage.onChanged listener here — Chrome supports multiple)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.ntp_state) {
+    _scheduleNotionSync();
+  }
+});
+
+// ── Respond to manual "Sync Now" message from newtab.js ──
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === 'NOTION_SYNC_NOW') {
+    notionSyncAllGroups()
+      .then(result => sendResponse(result))
+      .catch(err   => sendResponse({ ok: false, error: String(err) }));
+    return true; // keeps the message channel open for async response
+  }
+});

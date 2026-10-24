@@ -5599,8 +5599,14 @@ saveState = function () {
         state.tabGroups = (state.tabGroups || []).map(lg => {
           const sg = storedById.get(lg.id);
           if (!sg) return lg;
-          // Merge: local wins for UI fields; stored wins for runtime tracking fields
-          return Object.assign({}, sg, {
+          // Merge: local wins for UI fields; stored wins for runtime tracking fields.
+          // CRITICAL: merge INTO lg (never Object.assign({}, sg, ...)) — open UIs
+          // (note editor, rename/colour modals) hold a reference to this exact
+          // object; returning a fresh copy orphaned every later write onto a dead
+          // object while the UI still showed "Saved". Identity also keeps transient
+          // lock fields (_tgmCreating/_tgmClosing) intact across saves —
+          // background.js expires them via LOCK_MS, so retention is safe.
+          const merged = Object.assign({}, sg, {
             name:    lg.name,
             color:   lg.color,
             type:    lg.type,
@@ -5610,7 +5616,11 @@ saveState = function () {
             checklist: lg.checklist,
             textContent: lg.textContent,
             showTabGroups: lg.showTabGroups,
+            // Edit-time stamp must survive the save, or the keepNote guard in
+            // _tgmMergeGroups can never trigger (background.js never writes it).
+            updatedAt: lg.updatedAt || sg.updatedAt,
           });
+          return Object.assign(lg, merged);
         });
         // Append any groups that exist in storage but not locally (added by another tab).
         // Skip groups that were intentionally deleted in this session.
@@ -5768,5 +5778,111 @@ function initTabGroupsSidePanelControls() {
 initTabGroupsSidePanelControls();
 
 
+// ═══════════════════════════════════════════════════════
+// NOTION SYNC — Settings UI (newtab.js)
+// ═══════════════════════════════════════════════════════
 
+function initNotionSyncUI() {
+  const toggle     = document.getElementById('toggle-notion-sync');
+  const credsDiv   = document.getElementById('notion-credentials');
+  const tokenInput = document.getElementById('notion-token-input');
+  const dbInput    = document.getElementById('notion-db-input');
+  const saveBtn    = document.getElementById('notion-save-btn');
+  const statusEl   = document.getElementById('notion-status');
+  if (!toggle || !credsDiv) return;
 
+  // Add focus-glow style for inputs
+  const _ns = document.createElement('style');
+  _ns.textContent = `
+    #notion-token-input:focus, #notion-db-input:focus {
+      border-color: rgba(26,115,232,0.6) !important;
+      background: rgba(26,115,232,0.08) !important;
+    }
+    #notion-save-btn:hover { background: #1557b0 !important; }
+    #notion-save-btn:active { transform: scale(0.97); }
+  `;
+  document.head.appendChild(_ns);
+
+  // ── Load saved settings ──
+  chrome.storage.local.get(['notion_token', 'notion_db_id', 'notion_sync_enabled'], r => {
+    const enabled = !!r.notion_sync_enabled;
+    if (r.notion_token) tokenInput.value = r.notion_token;
+    if (r.notion_db_id) dbInput.value    = r.notion_db_id;
+    toggle.className = 'toggle' + (enabled ? ' on' : '');
+    credsDiv.style.display = enabled ? 'flex' : 'none';
+    if (enabled) statusEl.textContent = 'Auto-sync is active.';
+  });
+
+  // ── Toggle on/off ──
+  toggle.addEventListener('click', () => {
+    const nowEnabled = !toggle.classList.contains('on');
+    toggle.className = 'toggle' + (nowEnabled ? ' on' : '');
+    credsDiv.style.display = nowEnabled ? 'flex' : 'none';
+    chrome.storage.local.set({ notion_sync_enabled: nowEnabled });
+    statusEl.style.color = '#9aa0a6';
+    statusEl.textContent = nowEnabled ? 'Auto-sync enabled.' : 'Notion sync disabled.';
+    setTimeout(() => {
+      if (statusEl.textContent.includes('sync')) statusEl.textContent = '';
+    }, 2200);
+  });
+
+  // ── Save & Sync Now ──
+  saveBtn.addEventListener('click', async () => {
+    const token = tokenInput.value.trim();
+    const dbId  = dbInput.value.trim().replace(/-/g, '');
+
+    if (!token) {
+      statusEl.style.color = '#fbbc04';
+      statusEl.textContent = '⚠ Integration Token is required.';
+      tokenInput.focus();
+      return;
+    }
+    if (!token.startsWith('secret_')) {
+      statusEl.style.color = '#fbbc04';
+      statusEl.textContent = '⚠ Token should start with "secret_".';
+      tokenInput.focus();
+      return;
+    }
+    if (!dbId || dbId.length < 32) {
+      statusEl.style.color = '#fbbc04';
+      statusEl.textContent = '⚠ Database ID looks invalid.';
+      dbInput.focus();
+      return;
+    }
+
+    statusEl.style.color = '#9aa0a6';
+    statusEl.textContent = '⏳ Saving & syncing…';
+    saveBtn.disabled = true;
+
+    await chrome.storage.local.set({
+      notion_token:        token,
+      notion_db_id:        dbId,
+      notion_sync_enabled: true,
+    });
+    toggle.className = 'toggle on';
+    credsDiv.style.display = 'flex';
+
+    // Ask background.js to sync immediately
+    chrome.runtime.sendMessage({ type: 'NOTION_SYNC_NOW' }, resp => {
+      saveBtn.disabled = false;
+      if (chrome.runtime.lastError) {
+        statusEl.style.color = '#ea4335';
+        statusEl.textContent = '✗ ' + chrome.runtime.lastError.message;
+        return;
+      }
+      if (resp && resp.ok) {
+        statusEl.style.color = '#34a853';
+        statusEl.textContent = `✓ Synced ${resp.count} group(s) to Notion.`;
+      } else {
+        statusEl.style.color = '#ea4335';
+        statusEl.textContent = '✗ ' + (resp && resp.error ? resp.error : 'Unknown error. Check token & DB ID.');
+      }
+      setTimeout(() => {
+        statusEl.style.color = '#9aa0a6';
+        statusEl.textContent = resp && resp.ok ? 'Auto-sync is active.' : '';
+      }, 5000);
+    });
+  });
+}
+
+initNotionSyncUI();
