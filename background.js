@@ -381,3 +381,190 @@ chrome.tabGroups.onRemoved.addListener(tabGroup => {
     return true;
   }).catch(err => console.warn('[TGM bg] tabGroups.onRemoved error:', err));
 });
+
+// ═══════════════════════════════════════════════════════
+// CONTEXT MENU — "Add to Group" submenu
+// ═══════════════════════════════════════════════════════
+
+const CTX_PARENT_ID = 'tgm_add_to_group';
+const CTX_NEW_GROUP = 'tgm_new_group';
+
+// Normalise URL — same logic as normUrl() above
+function ctxNormUrl(u) {
+  try {
+    const x = new URL(u);
+    return x.protocol + '//' + x.host + x.pathname.replace(/\/+$/, '') + x.search;
+  } catch (_) { return (u || '').trim(); }
+}
+
+// Build (or rebuild) the full submenu from current ntp_state.
+// Called on install, startup, and whenever ntp_state changes.
+async function rebuildContextMenu() {
+  await chrome.contextMenus.removeAll();
+
+  // Parent item — always visible on http/https pages
+  chrome.contextMenus.create({
+    id:                  CTX_PARENT_ID,
+    title:               'Add to Group',
+    contexts:            ['page'],
+    documentUrlPatterns: ['http://*/*', 'https://*/*'],
+  });
+
+  const r      = await chrome.storage.local.get(['ntp_state']).catch(() => ({}));
+  const groups = (r.ntp_state && Array.isArray(r.ntp_state.tabGroups))
+    ? r.ntp_state.tabGroups
+    : [];
+
+  if (groups.length === 0) {
+    // No groups yet — offer to create one
+    chrome.contextMenus.create({
+      id:                  CTX_NEW_GROUP,
+      parentId:            CTX_PARENT_ID,
+      title:               '➕ Create New Group',
+      contexts:            ['page'],
+      documentUrlPatterns: ['http://*/*', 'https://*/*'],
+    });
+    return;
+  }
+
+  // One child per saved group
+  for (const g of groups) {
+    chrome.contextMenus.create({
+      id:                  `tgm_group_${g.id}`,
+      parentId:            CTX_PARENT_ID,
+      title:               g.name || 'Unnamed Group',
+      contexts:            ['page'],
+      documentUrlPatterns: ['http://*/*', 'https://*/*'],
+    });
+  }
+
+  // "Create New Group" always at the bottom
+  chrome.contextMenus.create({
+    id:                  CTX_NEW_GROUP,
+    parentId:            CTX_PARENT_ID,
+    title:               '➕ Create New Group',
+    contexts:            ['page'],
+    documentUrlPatterns: ['http://*/*', 'https://*/*'],
+  });
+}
+
+// Rebuild on install and browser startup
+chrome.runtime.onInstalled.addListener(() => rebuildContextMenu());
+chrome.runtime.onStartup.addListener(()   => rebuildContextMenu());
+
+// Rebuild whenever ntp_state changes (group added / renamed / deleted on New Tab page)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.ntp_state) {
+    rebuildContextMenu();
+  }
+});
+
+// ── Handle clicks on context menu items ──
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (!tab || !tab.url) return;
+
+  // "Create New Group" → open New Tab page
+  if (info.menuItemId === CTX_NEW_GROUP) {
+    chrome.tabs.create({ url: 'chrome://newtab/' });
+    return;
+  }
+
+  // Group items are prefixed with 'tgm_group_'
+  if (!String(info.menuItemId).startsWith('tgm_group_')) return;
+
+  const groupId  = String(info.menuItemId).replace('tgm_group_', '');
+  const tabUrl   = tab.url;
+  const tabTitle = tab.title || tabUrl;
+  const normalized = ctxNormUrl(tabUrl);
+
+  // Track whether we hit a duplicate
+  let isDuplicate = false;
+  let targetGroupName = '';
+
+  // Read → check → write atomically via updateState
+  await updateState(s => {
+    const g = s.tabGroups.find(x => String(x.id) === groupId);
+    if (!g) return false;
+
+    targetGroupName = g.name || 'Group';
+    g.tabs = g.tabs || [];
+
+    // Duplicate check
+    if (g.tabs.some(t => ctxNormUrl(t.url) === normalized)) {
+      isDuplicate = true;
+      return false; // nothing to save
+    }
+
+    const favicon = `chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(tabUrl)}&size=64`;
+    g.tabs.push({ title: tabTitle, url: tabUrl, favicon });
+    return true;
+  });
+
+  // If group wasn't found via updateState, try to read the name directly
+  if (!targetGroupName) {
+    const r2 = await chrome.storage.local.get(['ntp_state']).catch(() => ({}));
+    const g2 = ((r2.ntp_state || {}).tabGroups || []).find(x => String(x.id) === groupId);
+    targetGroupName = g2 ? (g2.name || 'Group') : 'Group';
+  }
+
+  // Build toast message
+  const toastMsg = isDuplicate
+    ? `Already in "${targetGroupName}"`
+    : `✓ Added to "${targetGroupName}"`;
+
+  // Inject toast into the current page via scripting API
+  chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (msg) => {
+      // Remove any existing TGM toast to avoid stacking
+      const old = document.getElementById('__tgm_toast__');
+      if (old) old.remove();
+
+      const t = document.createElement('div');
+      t.id = '__tgm_toast__';
+      t.textContent = msg;
+      Object.assign(t.style, {
+        position:       'fixed',
+        bottom:         '28px',
+        left:           '50%',
+        transform:      'translateX(-50%) translateY(20px)',
+        background:     'rgba(32,33,36,0.93)',
+        backdropFilter: 'blur(10px)',
+        webkitBackdropFilter: 'blur(10px)',
+        color:          '#e8eaed',
+        padding:        '10px 22px',
+        borderRadius:   '10px',
+        fontSize:       '14px',
+        fontFamily:     'system-ui, -apple-system, sans-serif',
+        fontWeight:     '500',
+        zIndex:         '2147483647',
+        boxShadow:      '0 4px 20px rgba(0,0,0,0.45)',
+        border:         '1px solid rgba(255,255,255,0.1)',
+        transition:     'opacity 0.3s ease, transform 0.3s ease',
+        opacity:        '0',
+        pointerEvents:  'none',
+        lineHeight:     '1.4',
+      });
+      document.body.appendChild(t);
+
+      // Animate in
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          t.style.opacity   = '1';
+          t.style.transform = 'translateX(-50%) translateY(0)';
+        });
+      });
+
+      // Animate out + remove
+      setTimeout(() => {
+        t.style.opacity   = '0';
+        t.style.transform = 'translateX(-50%) translateY(10px)';
+        setTimeout(() => { if (t.parentNode) t.remove(); }, 350);
+      }, 2800);
+    },
+    args: [toastMsg],
+  }).catch(() => {
+    // Silently fail if scripting isn't allowed on this page (e.g. PDF viewer)
+    console.warn('[TGM ctx] Could not inject toast on this page.');
+  });
+});

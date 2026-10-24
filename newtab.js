@@ -3655,6 +3655,8 @@ function _tgmOpenModal({
     urlEl.value = '';
   }
 
+  inputEl.classList.remove('tgm-invalid');
+
   if (showInput !== false) {
     inputEl.style.display = '';
     inputEl.value = inputValue || '';
@@ -3764,6 +3766,8 @@ function _tgmOpenModal({
   _tgmModalCb = {
     onSave,
     onDelete,
+    // Name is required for group/note create & rename modals (name input, no URL field)
+    requireName: showInput !== false && !showUrlInput,
     getType: () => currentType,
     getPickedColor: () => _pickedColor
   };
@@ -3792,11 +3796,20 @@ document.getElementById('tgm-modal-overlay').addEventListener('click', e => {
 });
 document.getElementById('tgm-modal-save').addEventListener('click', () => {
   if (_tgmModalCb && _tgmModalCb.onSave) {
-    const inputVal    = document.getElementById('tgm-modal-input').value.trim();
+    const inputEl     = document.getElementById('tgm-modal-input');
+    const inputVal    = inputEl.value.trim();
     const urlVal      = document.getElementById('tgm-modal-url-input').value.trim();
     const cb          = _tgmModalCb.onSave;
     const type        = _tgmModalCb.getType ? _tgmModalCb.getType() : null;
     const pickedColor = _tgmModalCb.getPickedColor ? _tgmModalCb.getPickedColor() : null;
+
+    // Empty name: red stroke on the input and keep the modal open
+    if (_tgmModalCb.requireName && !inputVal) {
+      inputEl.classList.add('tgm-invalid');
+      inputEl.focus();
+      return;
+    }
+
     _tgmCloseModal();
     cb(inputVal, urlVal, type, pickedColor);
   } else {
@@ -3813,6 +3826,9 @@ document.getElementById('tgm-modal-delete').addEventListener('click', () => {
 document.getElementById('tgm-modal-input').addEventListener('keydown', e => {
   if (e.key === 'Enter')  document.getElementById('tgm-modal-save').click();
   if (e.key === 'Escape') _tgmCloseModal();
+});
+document.getElementById('tgm-modal-input').addEventListener('input', e => {
+  e.target.classList.remove('tgm-invalid');
 });
 document.getElementById('tgm-modal-url-input').addEventListener('keydown', e => {
   if (e.key === 'Enter')  document.getElementById('tgm-modal-save').click();

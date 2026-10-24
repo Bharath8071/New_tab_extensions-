@@ -3,7 +3,7 @@
   "name": "New Tab - Shortcuts, Wallpaper & Tab Groups",
   "version": "11.1",
   "description": "Shortcuts, wallpaper customization and a Tab Group Manager on the New Tab page",
-  "permissions": ["storage", "topSites", "history", "favicon", "tabs", "tabGroups"],
+  "permissions": ["storage", "topSites", "history", "favicon", "tabs", "tabGroups", "contextMenus", "scripting", "activeTab"],
   "host_permissions": [
     "https://*.alphacoders.com/*",
     "https://*.unsplash.com/*",
