@@ -3942,6 +3942,8 @@ function renderGroupBar() {
     chip.addEventListener('dragstart', e => e.preventDefault());
 
     if (isActive) {
+      // Colour accent only for ACTIVE group chips. Note chips show colour via
+      // their tgm-dot only (set below) — no whole-chip tint.
       chip.style.borderColor = group.color + '80';   // shorthand first...
       chip.style.borderLeftColor = group.color;      // ...then the solid left accent
       chip.style.background = group.color + '26';
@@ -4150,13 +4152,16 @@ function _tgmOpenNoteDropdown(group, chipEl) {
     _tgmCloseDropdown();
     _tgmOpenModal({
       title: 'Rename Note',
+      showColorPicker: true, // same picker as group rename — the modal renders it
       showInput: true,
       inputValue: group.name,
       saveBtnText: 'Rename',
-      onSave: newName => {
+      onSave: (newName, _url, _type, pickedColor) => {
         const trimmed = (newName || '').trim();
         if (!trimmed) return;
         group.name = trimmed;
+        // Notes have no native Chrome group — just store the colour locally
+        if (pickedColor) group.color = pickedColor;
         saveState();
         renderGroupBar();
         _tgmShowToast(`Note renamed to "${trimmed}"`);
@@ -4470,6 +4475,17 @@ function _tgmOpenNoteDropdown(group, chipEl) {
 }
 
 // ─── Build & show the dropdown panel for a group ───
+// Shared empty-state markup for a group with no saved tabs
+const TGM_EMPTY_TABS_HTML = `
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="3"/>
+    <path d="M3 9h18"/>
+    <path d="M9 21V9"/>
+  </svg>
+  <div class="tgm-empty-title">No tabs saved yet</div>
+  <div class="tgm-empty-desc">Open pages while Active to save them</div>
+`;
+
 function _tgmOpenDropdown(groupId, chipEl) {
   const group = (state.tabGroups || []).find(g => g.id === groupId);
   if (!group) return;
@@ -4629,15 +4645,7 @@ function _tgmOpenDropdown(groupId, chipEl) {
   if (!group.tabs || group.tabs.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'tgm-dd-empty';
-    empty.innerHTML = `
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="3"/>
-        <path d="M3 9h18"/>
-        <path d="M9 21V9"/>
-      </svg>
-      <div class="tgm-empty-title">No tabs saved yet</div>
-      <div class="tgm-empty-desc">Open pages while Active to save them</div>
-    `;
+    empty.innerHTML = TGM_EMPTY_TABS_HTML;
     tabList.appendChild(empty);
   } else {
     group.tabs.forEach((tab, idx) => {
@@ -4665,6 +4673,7 @@ function _tgmOpenDropdown(groupId, chipEl) {
         const g = _tgmGetGroup(groupId) || group;
         const i = (g.tabs || []).findIndex(t => t.url === tab.url);
         if (i < 0) return;
+        const ddEl = row.closest('.tgm-dropdown'); // capture before the row is removed
         const [removed] = g.tabs.splice(i, 1);
         if (removed && removed.chromeTabId != null) {
           g.chromeTabIds = (g.chromeTabIds || []).filter(id => id !== removed.chromeTabId);
@@ -4673,11 +4682,20 @@ function _tgmOpenDropdown(groupId, chipEl) {
             g.removedTabIds.push(removed.chromeTabId);
           }
         }
-        _tgmCloseDropdown();
+
+        // Update the open dropdown in place — no close/reopen, so no flicker
+        row.remove();
+        const left = (g.tabs || []).length;
+        const badge = ddEl && ddEl.querySelector('.tgm-dd-badge');
+        if (badge) badge.textContent = `${left} tab${left === 1 ? '' : 's'}`;
+        if (left === 0 && ddEl) {
+          const list = ddEl.querySelector('.tgm-dd-tabs');
+          if (list) list.innerHTML = `<div class="tgm-dd-empty">${TGM_EMPTY_TABS_HTML}</div>`;
+        }
+
         // Ungroup (don't close) the live tab, otherwise its next page load re-saves it
         await _tgmDetachFromChrome(g, removed);
         await saveState();
-        renderGroupBar();
         _tgmShowToast(`Removed tab from "${g.name}".`);
       });
 
