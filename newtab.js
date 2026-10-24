@@ -3725,12 +3725,13 @@ function _tgmOpenModal({
       }
     });
 
-    // Inject 6 preset swatches from the first 6 GROUP_COLORS
-    const PRESETS = GROUP_COLORS.slice(0, 6);
+    // Preset swatches: 6 theme colours + pure white and black
+    const PRESETS = GROUP_COLORS.slice(0, 6).concat(['#ffffff', '#000000']);
     PRESETS.forEach(hex => {
       const sw = document.createElement('button');
       sw.type = 'button';
-      sw.className = 'tgm-color-swatch';
+      sw.className = 'tgm-color-swatch' +
+        (hex === '#ffffff' || hex === '#000000' ? ' tgm-swatch-ring' : '');
       sw.style.background = hex;
       sw.title = hex;
       sw.addEventListener('click', () => {
@@ -3739,6 +3740,13 @@ function _tgmOpenModal({
         hslWrap.classList.remove('open');
         sw.classList.add('selected');
         _pickedColor = hex;
+
+        // Sync the (hidden) H/S/L sliders so the custom wheel starts from this colour
+        const { h, s, l } = _tgmHexToHsl(hex);
+        document.getElementById('tgm-hsl-hue').value = h;
+        document.getElementById('tgm-hsl-sat').value = s;
+        document.getElementById('tgm-hsl-lit').value = l;
+        _tgmUpdateHslPreview();
       });
       colorRow.insertBefore(sw, customBtn);
     });
@@ -3803,8 +3811,10 @@ document.getElementById('tgm-modal-save').addEventListener('click', () => {
     const type        = _tgmModalCb.getType ? _tgmModalCb.getType() : null;
     const pickedColor = _tgmModalCb.getPickedColor ? _tgmModalCb.getPickedColor() : null;
 
-    // Empty name: red stroke on the input and keep the modal open
+    // Empty name: red stroke + shake, and keep the modal open
     if (_tgmModalCb.requireName && !inputVal) {
+      inputEl.classList.remove('tgm-invalid');
+      void inputEl.offsetWidth; // reflow so the shake replays on repeated submits
       inputEl.classList.add('tgm-invalid');
       inputEl.focus();
       return;
@@ -3853,6 +3863,27 @@ function _tgmGetHslHex() {
   const s = +document.getElementById('tgm-hsl-sat').value;
   const l = +document.getElementById('tgm-hsl-lit').value;
   return _tgmHslToHex(h, s, l);
+}
+
+// Convert #rrggbb → { h: 0-360, s: 0-100, l: 0-100 } (used to sync presets into the wheel)
+function _tgmHexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r)      h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else                h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) };
 }
 
 function _tgmUpdateHslPreview() {

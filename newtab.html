@@ -2329,10 +2329,19 @@
       box-shadow: 0 0 0 2px rgba(138, 180, 248, 0.25);
     }
 
+    @keyframes tgm-shake {
+      0%, 100% { transform: translateX(0); }
+      20%      { transform: translateX(-6px); }
+      40%      { transform: translateX(6px); }
+      60%      { transform: translateX(-4px); }
+      80%      { transform: translateX(4px); }
+    }
+
     .tgm-modal input.tgm-invalid,
     .tgm-modal input.tgm-invalid:focus {
       border-color: #ea4335;
       box-shadow: 0 0 0 2px rgba(234, 67, 53, 0.18);
+      animation: tgm-shake 0.4s ease;
     }
 
     .tgm-modal-btns {
@@ -2444,6 +2453,12 @@
       transform: scale(1.14);
     }
 
+    /* Inner ring keeps pure white/black swatches visible on the dark modal */
+    .tgm-color-swatch.tgm-swatch-ring {
+      outline: 2px solid rgba(255, 255, 255, 0.45);
+      outline-offset: -3px;
+    }
+
     /* 7th swatch: conic-gradient rainbow */
     .tgm-color-custom-btn {
       width: 26px;
@@ -2456,6 +2471,7 @@
         hsl(270,100%,65%), hsl(300,100%,60%), hsl(330,100%,60%),
         hsl(360,100%,60%)
       );
+      background-clip: padding-box;
       border: 2.5px solid rgba(255,255,255,0.22);
       cursor: pointer;
       flex-shrink: 0;
@@ -2663,13 +2679,15 @@
           <input type="range" class="tgm-hsl-slider" id="tgm-hsl-hue" min="0" max="360" value="200">
           <div class="tgm-hsl-preview" id="tgm-hsl-preview"></div>
         </div>
-        <div class="tgm-hsl-row">
+        <!-- S and L are hidden for now; picking a preset still writes their values
+             so the custom wheel continues from that colour -->
+        <div class="tgm-hsl-row" style="display:none">
           <label>S</label>
           <input type="range" class="tgm-hsl-slider" id="tgm-hsl-sat" min="0" max="100" value="72">
         </div>
-        <div class="tgm-hsl-row">
+        <div class="tgm-hsl-row" style="display:none">
           <label>L</label>
-          <input type="range" class="tgm-hsl-slider" id="tgm-hsl-lit" min="10" max="90" value="52">
+          <input type="range" class="tgm-hsl-slider" id="tgm-hsl-lit" min="0" max="100" value="52">
         </div>
       </div>
 
