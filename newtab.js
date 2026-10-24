@@ -4291,6 +4291,9 @@ function _tgmOpenNoteDropdown(group, chipEl) {
   // Debounced auto-save for typing in text input and textarea
   let saveTimer = null;
   function triggerAutoSave() {
+    // Stamp the edit time NOW, not at save time: storage.onChanged may deliver a
+    // pre-edit snapshot from background.js during the 250ms debounce window.
+    group.updatedAt = Date.now();
     statusWrap.style.opacity = '0.5';
     const statusText = statusWrap.querySelector('span');
     if (statusText) statusText.textContent = 'Saving...';
@@ -4483,7 +4486,7 @@ function _tgmOpenNoteDropdown(group, chipEl) {
     group.noteMode = 'checklist';
     btnChecklist.classList.add('active');
     btnText.classList.remove('active');
-    triggerAutoSave();
+    saveImmediate();
     renderChecklistView();
   });
 
@@ -4493,7 +4496,7 @@ function _tgmOpenNoteDropdown(group, chipEl) {
     group.noteMode = 'text';
     btnText.classList.add('active');
     btnChecklist.classList.remove('active');
-    triggerAutoSave();
+    saveImmediate();
     renderTextView();
   });
 
@@ -5636,8 +5639,15 @@ function _tgmMergeGroups(incoming) {
   state.tabGroups = incoming.map(n => {
     const o = old.get(n.id);
     if (!o) return n;
+    // A background.js read-modify-write can arrive carrying a pre-edit snapshot.
+    // Keep newer local note state so noteMode/content can't silently revert.
+    const keepNote = o.type === 'note' && (o.updatedAt || 0) > (n.updatedAt || 0);
+    const noteState = keepNote
+      ? { noteMode: o.noteMode, checklist: o.checklist, textContent: o.textContent }
+      : null;
     for (const k of Object.keys(o)) if (!(k in n)) delete o[k];
     Object.assign(o, n);
+    if (noteState) Object.assign(o, noteState);
     return o;
   });
 }
