@@ -399,25 +399,68 @@ function ctxNormUrl(u) {
 
 // Build (or rebuild) the full submenu from current ntp_state.
 // Called on install, startup, and whenever ntp_state changes.
-async function rebuildContextMenu() {
+//
+// Fix #14, part 1: rebuilds are SERIALIZED through a queue. Every step used
+// to contain an await, so two ntp_state writes a few ms apart let runs
+// interleave — run 2's removeAll() landed mid-run-1, and the second
+// tgm_add_to_group create failed with "Cannot create item with duplicate id".
+// Part 2: rebuilds are SKIPPED when nothing the menu shows has changed
+// (only group ids + names appear in it), so slider moves / tab auto-saves
+// no longer churn the menu and wake the worker for nothing.
+let _menuQueue = Promise.resolve();
+// null = "never built". Must differ from '' — an empty menu (no groups yet)
+// also produces an empty signature, so '' as the initial value would skip
+// the very first build on a fresh install.
+let _menuSig   = null;
+
+function rebuildContextMenu(force) {
+  if (force) _menuSig = null; // menu starts empty after install/startup → must rebuild
+  _menuQueue = _menuQueue.then(_doRebuild).catch(err => {
+    console.warn('[TGM ctx] context menu rebuild failed:', err);
+  });
+  return _menuQueue;
+}
+
+// create() wrapper: read runtime.lastError immediately (or catch the throw)
+// so failures are logged by us instead of surfacing as
+// "Unchecked runtime.lastError" noise.
+function _ctxCreate(props) {
+  try {
+    chrome.contextMenus.create(props);
+    if (chrome.runtime.lastError) console.warn('[TGM ctx] create failed:', chrome.runtime.lastError.message);
+  } catch (err) {
+    console.warn('[TGM ctx] create threw:', err);
+  }
+}
+
+async function _doRebuild() {
+  // Read FIRST (before touching the menu): a failed read must not wipe a
+  // working menu, and must not record a signature either.
+  const r = await chrome.storage.local.get(['ntp_state']).catch(() => null);
+  if (!r) return;
+  const groups = (r.ntp_state && Array.isArray(r.ntp_state.tabGroups))
+    ? r.ntp_state.tabGroups
+    : [];
+
+  // Signature = exactly what the menu displays: group ids, names and order.
+  // Parent + "Create New Group" are constants and don't affect it.
+  const sig = groups.map(g => `${g.id}:${g.name || ''}`).join('|');
+  if (sig === _menuSig) return; // menu already shows exactly this
+  _menuSig = sig;
+
   await chrome.contextMenus.removeAll();
 
   // Parent item — always visible on http/https pages
-  chrome.contextMenus.create({
+  _ctxCreate({
     id:                  CTX_PARENT_ID,
     title:               'Add to Group',
     contexts:            ['page'],
     documentUrlPatterns: ['http://*/*', 'https://*/*'],
   });
 
-  const r      = await chrome.storage.local.get(['ntp_state']).catch(() => ({}));
-  const groups = (r.ntp_state && Array.isArray(r.ntp_state.tabGroups))
-    ? r.ntp_state.tabGroups
-    : [];
-
   if (groups.length === 0) {
     // No groups yet — offer to create one
-    chrome.contextMenus.create({
+    _ctxCreate({
       id:                  CTX_NEW_GROUP,
       parentId:            CTX_PARENT_ID,
       title:               '➕ Create New Group',
@@ -429,7 +472,7 @@ async function rebuildContextMenu() {
 
   // One child per saved group
   for (const g of groups) {
-    chrome.contextMenus.create({
+    _ctxCreate({
       id:                  `tgm_group_${g.id}`,
       parentId:            CTX_PARENT_ID,
       title:               g.name || 'Unnamed Group',
@@ -439,7 +482,7 @@ async function rebuildContextMenu() {
   }
 
   // "Create New Group" always at the bottom
-  chrome.contextMenus.create({
+  _ctxCreate({
     id:                  CTX_NEW_GROUP,
     parentId:            CTX_PARENT_ID,
     title:               '➕ Create New Group',
@@ -448,9 +491,11 @@ async function rebuildContextMenu() {
   });
 }
 
-// Rebuild on install and browser startup
-chrome.runtime.onInstalled.addListener(() => rebuildContextMenu());
-chrome.runtime.onStartup.addListener(()   => rebuildContextMenu());
+// Rebuild on install and browser startup — force, because the menu starts
+// empty then (extension reload wipes it; browser restart too) and the
+// signature check would otherwise skip the rebuild.
+chrome.runtime.onInstalled.addListener(() => rebuildContextMenu(true));
+chrome.runtime.onStartup.addListener(()   => rebuildContextMenu(true));
 
 // Rebuild whenever ntp_state changes (group added / renamed / deleted on New Tab page)
 chrome.storage.onChanged.addListener((changes, area) => {
