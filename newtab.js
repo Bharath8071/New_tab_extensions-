@@ -445,6 +445,15 @@ function _mirrorFastPaint() {
   } catch (_) {}
 }
 
+// Fix #18: colour mode owns no image. Drop the fast-paint thumb mirror whenever
+// the wallpaper is cleared — otherwise <head> fastpaint paints the previous
+// wallpaper's blurred thumb on every new tab, and colour mode never runs a full
+// applyBg() at startup to clear it, so the old image stays stuck over the colour.
+function _purgeStaleThumbMirror() {
+  try { chrome.storage.local.remove('ntp_wp_thumb'); } catch (_) {}
+  try { localStorage.removeItem('ntp_wp_thumb'); } catch (_) {}
+}
+
 // Pre-decode off the critical path so the swap never flashes half-decoded
 function _predecode(url) {
   return new Promise(resolve => {
@@ -668,6 +677,11 @@ function loadState(cb) {
         chrome.storage.local.set({ ntp_wallpaper: state.wallpaper });
       }
 
+      // Fix #18: colour mode — heal a thumb mirror left behind by an older
+      // version (or a missed cleanup) so future fastpaint starts clean. Blob
+      // markers keep their thumb: their restore chains use it as placeholder.
+      if (!state.wallpaper) _purgeStaleThumbMirror();
+
       run();
     } catch (err) {
       console.error('[NTP] loadState failed, using defaults:', err);
@@ -843,15 +857,29 @@ function applyBg(skipImage) {
   const themeMeta = document.querySelector('meta[name="theme-color"]');
   if (themeMeta) themeMeta.content = color;
 
+  // Fix #18b: #bg carries a hard-coded inline background (#202124) in the
+  // markup, which beats the --bg-color stylesheet rule. Colour mode has no
+  // image to cover it, so write the colour here — in BOTH the colour-only
+  // startup pass and the full pass — or the black layer hides the colour.
+  if (bg) bg.style.backgroundColor = color;
+
   // Initial load: color/meta only. The INIT blur-up chain owns first image
   // paint — painting a URL here would pop the full image in early and the
   // chain would repaint it (flicker), especially for legacy inline URLs.
-  if (skipImage) return;
+  if (skipImage) {
+    // Fix #18: colour mode has no image to own, so clear any wallpaper layer
+    // <head> fastpaint already painted from a stale thumb mirror. Without this
+    // the previous wallpaper stays visible on top of the solid colour forever.
+    if (!state.wallpaper && bg) {
+      bg.style.backgroundImage = 'none';
+      bg.style.filter = 'none';
+      document.documentElement.style.backgroundImage = 'none';
+    }
+    return;
+  }
 
   // Fix #9: guard against #bg not yet in DOM
   if (!bg) return;
-
-  bg.style.backgroundColor = color;
 
   // Explicitly cleared wallpaper or color swatch mode
   if (!state.wallpaper) {
@@ -2144,6 +2172,9 @@ BG_COLORS.forEach(({ label, value }) => {
     state.bgColor = value; state.wallpaper = '';
     // Increment wallpaper gen to cancel any in-flight async wallpaper loads
     _wallpaperGen++;
+    // Fix #18: clear the old wallpaper's thumb mirror too, so the NEXT cold load
+    // does not fast-paint it behind the solid colour.
+    _purgeStaleThumbMirror();
     saveState(); applyBg();
   
     colorsEl.querySelectorAll('.cp-swatch').forEach(s => s.classList.remove('active'));
