@@ -5739,6 +5739,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (newUrl && newUrl !== state.wallpaper &&
         !['__gif__', '__upload__'].includes(state.wallpaper)) {
       state.wallpaper = newUrl;
+      // Fix #17: the old preset's blob URL is still held in _uploadBlobUrl, and
+      // applyBg() returns early while it is set (its "active blob" branch), so
+      // the new wallpaper never painted here — state said newUrl, screen still
+      // showed the old image, and B's next save wrote the stale view back.
+      // Cancel any in-flight loader and drop the blob first; applyBg then
+      // falls through and paints newUrl.
+      _wallpaperGen++;
+      if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
       applyBg();
     }
   }
