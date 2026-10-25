@@ -571,95 +571,112 @@ let state = {
 };
 
 function loadState(cb) {
+  // Fix #07a: cb must fire exactly once — startup (and the body.loaded reveal)
+  // hangs on it, so success, early-return and throw paths all go through run().
+  let _cbDone = false;
+  const run = () => { if (_cbDone) return; _cbDone = true; cb(); };
   chrome.storage.local.get(['ntp_state', 'ntp_wallpaper', 'ntp_wp_thumb'], r => {
-    _perfMark('storage-ok');
-    if (r.ntp_state) {
-      const loaded = r.ntp_state;
-      
-      // Migrate old two-array format to new unified format
-      let _migrated = false;
-      if (loaded.topShortcuts || loaded.extraShortcuts) {
-        const top = loaded.topShortcuts || [];
-        const extra = loaded.extraShortcuts || [];
-        loaded.allShortcuts = [...top, ...extra].slice(0, 20);
-        loaded.showShortcuts = loaded.showTop !== false && loaded.showExtra !== false; // both must be true
-        delete loaded.topShortcuts;
-        delete loaded.extraShortcuts;
-        delete loaded.showTop;
-        delete loaded.showExtra;
-        _migrated = true;
-      }
-      
-      // Handle legacy individual show flags
-      if (loaded.showTopRow !== undefined || loaded.showExtraRow !== undefined) {
-        loaded.showShortcuts = loaded.showTopRow !== false && loaded.showExtraRow !== false;
-        delete loaded.showTopRow;
-        delete loaded.showExtraRow;
-        _migrated = true;
-      }
-      
-      Object.assign(state, loaded);
-      // BUG FIX: Persist the migrated state so the old keys don't re-appear next load
-      if (_migrated) { chrome.storage.local.set({ ntp_state: state }); }
-    }
-    
-    // Ensure arrays exist
-    if (!Array.isArray(state.allShortcuts)) state.allShortcuts = [...TOP_DEFAULTS, ...EXTRA_DEFAULTS].slice(0, 20);
-    if (!Array.isArray(state.searchHistory)) state.searchHistory = [];
-    if (!Array.isArray(state.tabGroups)) state.tabGroups = [];
-
-    // Paint the solid color synchronously — zero flash of wrong color.
-    // Image itself is owned by the INIT blur-up chain (skipImage avoids
-    // an early full-res pop that the chain would then repaint = flicker).
-    applyBg(true);
-
-    // Seed the sync <head> mirror for the NEXT cold load (best-effort)
-    _mirrorFastPaint();
     try {
-      if (r.ntp_wp_thumb) localStorage.setItem('ntp_wp_thumb', r.ntp_wp_thumb);
-    } catch (_) {}
+      if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
+      r = r || {};
+      _perfMark('storage-ok');
+      // Only accept ntp_state when it is a plain object — a corrupted value
+      // (string/array) must not be Object.assign'd into state.
+      if (r.ntp_state && typeof r.ntp_state === 'object' && !Array.isArray(r.ntp_state)) {
+        const loaded = r.ntp_state;
 
-    // ── CRITICAL: GIF check MUST run BEFORE ntp_wallpaper restore ──
-    // ntp_wallpaper can hold a stale static URL from before the GIF was set.
-    // If we restore ntp_wallpaper first it silently overwrites '__gif__' and
-    // _applyGifFromIDB() is never called → old wallpaper shows on every reload.
-    if (state.wallpaper === '__gif__') {
-      // Wipe stale ntp_wallpaper so it can never poison a future load
-      chrome.storage.local.remove('ntp_wallpaper');
-      cb(); // render UI immediately — don't block on GIF decode
-      _applyGifFromIDB(); // fast first-load path: pre-decodes, no 200ms fade wait
-      return;
-    }
-
-    // ── Uploaded image (blob in IDB cache) ──
-    // Non-blocking: paint thumbnail (if any) instantly, render UI, swap full-res in.
-    if (state.wallpaper === '__upload__') {
-      chrome.storage.local.remove('ntp_wallpaper');
-      if (r.ntp_wp_thumb) { _paintBgThumb(r.ntp_wp_thumb); _perfMark('thumb-inline'); }
-      cb();
-      _applyUploadFromCache('custom_upload').then(async blobUrl => {
-        if (blobUrl) {
-          _perfMark('blob-ok');
-          await _predecode(blobUrl);
-          _perfMark('decoded');
-          _paintBgSharp(blobUrl);
-          _perfMark('sharp');
+        // Migrate old two-array format to new unified format
+        let _migrated = false;
+        if (loaded.topShortcuts || loaded.extraShortcuts) {
+          const top = loaded.topShortcuts || [];
+          const extra = loaded.extraShortcuts || [];
+          loaded.allShortcuts = [...top, ...extra].slice(0, 20);
+          loaded.showShortcuts = loaded.showTop !== false && loaded.showExtra !== false; // both must be true
+          delete loaded.topShortcuts;
+          delete loaded.extraShortcuts;
+          delete loaded.showTop;
+          delete loaded.showExtra;
+          _migrated = true;
         }
-        else { state.wallpaper = ''; chrome.storage.local.remove('ntp_wp_thumb'); try { localStorage.removeItem('ntp_wp_thumb'); } catch (_) {} saveState(); applyBg(); }
-      });
-      return;
-    }
 
-    // Restore static wallpaper from separate storage key (new format)
-    if (r.ntp_wallpaper) {
-      state.wallpaper = r.ntp_wallpaper;
-    }
-    // Migrate: wallpaper still inlined in old ntp_state — split it out now
-    else if (state.wallpaper && !r.ntp_wallpaper) {
-      chrome.storage.local.set({ ntp_wallpaper: state.wallpaper });
-    }
+        // Handle legacy individual show flags
+        if (loaded.showTopRow !== undefined || loaded.showExtraRow !== undefined) {
+          loaded.showShortcuts = loaded.showTopRow !== false && loaded.showExtraRow !== false;
+          delete loaded.showTopRow;
+          delete loaded.showExtraRow;
+          _migrated = true;
+        }
 
-    cb();
+        Object.assign(state, loaded);
+        // BUG FIX: Persist the migrated state so the old keys don't re-appear next load
+        if (_migrated) { chrome.storage.local.set({ ntp_state: state }); }
+      }
+
+      // Ensure arrays exist
+      if (!Array.isArray(state.allShortcuts)) state.allShortcuts = [...TOP_DEFAULTS, ...EXTRA_DEFAULTS].slice(0, 20);
+      if (!Array.isArray(state.searchHistory)) state.searchHistory = [];
+      if (!Array.isArray(state.tabGroups)) state.tabGroups = [];
+
+      // Paint the solid color synchronously — zero flash of wrong color.
+      // Image itself is owned by the INIT blur-up chain (skipImage avoids
+      // an early full-res pop that the chain would then repaint = flicker).
+      applyBg(true);
+
+      // Seed the sync <head> mirror for the NEXT cold load (best-effort)
+      _mirrorFastPaint();
+      try {
+        if (r.ntp_wp_thumb) localStorage.setItem('ntp_wp_thumb', r.ntp_wp_thumb);
+      } catch (_) {}
+
+      // ── CRITICAL: GIF check MUST run BEFORE ntp_wallpaper restore ──
+      // ntp_wallpaper can hold a stale static URL from before the GIF was set.
+      // If we restore ntp_wallpaper first it silently overwrites '__gif__' and
+      // _applyGifFromIDB() is never called → old wallpaper shows on every reload.
+      if (state.wallpaper === '__gif__') {
+        // Wipe stale ntp_wallpaper so it can never poison a future load
+        chrome.storage.local.remove('ntp_wallpaper');
+        run(); // render UI immediately — don't block on GIF decode
+        _applyGifFromIDB(); // fast first-load path: pre-decodes, no 200ms fade wait
+        return;
+      }
+
+      // ── Uploaded image (blob in IDB cache) ──
+      // Non-blocking: paint thumbnail (if any) instantly, render UI, swap full-res in.
+      if (state.wallpaper === '__upload__') {
+        chrome.storage.local.remove('ntp_wallpaper');
+        if (r.ntp_wp_thumb) { _paintBgThumb(r.ntp_wp_thumb); _perfMark('thumb-inline'); }
+        run();
+        _applyUploadFromCache('custom_upload').then(async blobUrl => {
+          if (blobUrl) {
+            _perfMark('blob-ok');
+            await _predecode(blobUrl);
+            _perfMark('decoded');
+            _paintBgSharp(blobUrl);
+            _perfMark('sharp');
+          }
+          else { state.wallpaper = ''; chrome.storage.local.remove('ntp_wp_thumb'); try { localStorage.removeItem('ntp_wp_thumb'); } catch (_) {} saveState(); applyBg(); }
+        });
+        return;
+      }
+
+      // Restore static wallpaper from separate storage key (new format)
+      if (r.ntp_wallpaper) {
+        state.wallpaper = r.ntp_wallpaper;
+      }
+      // Migrate: wallpaper still inlined in old ntp_state — split it out now
+      else if (state.wallpaper && !r.ntp_wallpaper) {
+        chrome.storage.local.set({ ntp_wallpaper: state.wallpaper });
+      }
+
+      run();
+    } catch (err) {
+      console.error('[NTP] loadState failed, using defaults:', err);
+      // Same ensure-array checks as the happy path so defaults can render
+      if (!Array.isArray(state.allShortcuts)) state.allShortcuts = [...TOP_DEFAULTS, ...EXTRA_DEFAULTS].slice(0, 20);
+      if (!Array.isArray(state.searchHistory)) state.searchHistory = [];
+      if (!Array.isArray(state.tabGroups)) state.tabGroups = [];
+      run();
+    }
   });
 }
 function saveState() {
@@ -705,19 +722,24 @@ function saveState() {
 function _preloadRemoteUrl(url, timeoutMs = 10000) {
   return new Promise(resolve => {
     let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    const timer = setTimeout(finish, timeoutMs);
+    // Fix #08: resolve(true) only when the image actually loaded; error or
+    // timeout resolves false so callers can roll back instead of persisting a
+    // URL that never painted.
+    const finish = ok => { if (!done) { done = true; resolve(ok); } };
+    const timer = setTimeout(() => finish(false), timeoutMs);
     const img = new Image();
     img.onload = () => {
       clearTimeout(timer);
-      if (img.decode) img.decode().then(finish).catch(finish);
-      else finish();
+      // onload already proves the resource is valid; a decode() hiccup can
+      // still paint (the browser retries lazily), so treat it as success.
+      if (img.decode) img.decode().then(() => finish(true)).catch(() => finish(true));
+      else finish(true);
     };
-    img.onerror = () => { clearTimeout(timer); finish(); };
+    img.onerror = () => { clearTimeout(timer); finish(false); };
     img.src = url;
     if (img.complete && img.naturalWidth > 0) {
       clearTimeout(timer);
-      finish();
+      finish(true);
     }
   });
 }
@@ -2144,34 +2166,58 @@ WALLPAPERS.forEach(({ label, url, thumb }) => {
   tile.onclick = async () => {
     if (tile.classList.contains('cp-wp-loading')) return; // already working
     tile.classList.add('cp-wp-loading');
+    // Fix #08: prove the image loads BEFORE committing anything. The old flow
+    // saved state.wallpaper/bgColor first, so a failed load (offline, bad URL)
+    // persisted a black background with a dead URL across reloads — and the
+    // upload blob was already revoked, breaking the current view too.
+    let ok = false;
+    let candidateBlobUrl = null; // owned here until commit; revoked if unused
+    let cachedBlob = null;
     try {
-      // Clear any upload blob URL so the remote URL paints correctly
-      if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
-
-      state.wallpaper = url;
-      state.bgColor = '#000000';
-      saveState();
-
       // Fast check: is this image already cached in IndexedDB?
       const cached = await _cacheGet(url);
-      if (cached && cached.blob) {
-        _uploadBlobUrl = URL.createObjectURL(cached.blob);
-        await _predecode(_uploadBlobUrl);
-        _paintBgSharp(_uploadBlobUrl);
-        _saveThumbForUpload(cached.blob); // refresh instant placeholder for next load
+      cachedBlob = (cached && cached.blob) ? cached.blob : null;
+      if (cachedBlob) {
+        candidateBlobUrl = URL.createObjectURL(cachedBlob);
+        await _predecode(candidateBlobUrl); // rejects → caught → nothing saved
+        ok = true;
       } else {
-        // Wait until the remote image actually decodes so the spinner
-        // covers the whole fetch — then blur-up swap + cache in background.
-        await _preloadRemoteUrl(url);
-        const thumb = await _makeThumbFromUrl(url);
-        if (thumb) { _paintBgThumb(thumb); _persistThumbDataUrl(thumb); }
-        _paintBgSharp(url);
-        _cacheRemoteWallpaper(url);
+        // Wait until the remote image actually loads; false = error/timeout.
+        ok = await _preloadRemoteUrl(url);
       }
+
+      if (ok) {
+        // ── Commit only now: swap blob ownership, persist, then paint ──
+        // Clear any upload blob URL so the remote URL paints correctly
+        if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+        if (candidateBlobUrl) { _uploadBlobUrl = candidateBlobUrl; candidateBlobUrl = null; }
+
+        state.wallpaper = url;
+        state.bgColor = '#000000';
+        saveState();
+
+        if (_uploadBlobUrl) {
+          _paintBgSharp(_uploadBlobUrl);
+          _saveThumbForUpload(cachedBlob); // refresh instant placeholder for next load
+        } else {
+          const th = await _makeThumbFromUrl(url);
+          if (th) { _paintBgThumb(th); _persistThumbDataUrl(th); }
+          _paintBgSharp(url);
+          _cacheRemoteWallpaper(url);
+        }
+      }
+    } catch (e) {
+      ok = false;
+      console.warn('[NTP] preset wallpaper load failed:', e);
     } finally {
+      if (candidateBlobUrl) URL.revokeObjectURL(candidateBlobUrl); // never committed
       tile.classList.remove('cp-wp-loading');
     }
 
+    if (!ok) {
+      _showToast("Couldn't load this wallpaper — check your connection.");
+      return; // state, colours and active marks stay exactly as they were
+    }
     document.querySelectorAll('.cp-wp').forEach(w => w.classList.remove('active'));
     tile.classList.add('active');
     colorsEl.querySelectorAll('.cp-swatch').forEach(s => s.classList.remove('active'));
@@ -2265,10 +2311,12 @@ if (brightnessSlider) {
 loadState(async () => {
   // Color/meta refresh only — image paint belongs to the blur-up chains below.
   // (Full applyBg here would pop the remote URL in early = start flicker.)
-  applyBg(true);
-  syncToggles();
-  syncBrightnessUI();
-  renderShortcuts();
+  // Fix #07b: each init call is protected separately and the reveal line can no
+  // longer be skipped — one failing call must never leave a blank new tab.
+  try { applyBg(true); } catch (e) { console.error('[NTP] applyBg failed:', e); }
+  try { syncToggles(); } catch (e) { console.error('[NTP] syncToggles failed:', e); }
+  try { syncBrightnessUI(); } catch (e) { console.error('[NTP] syncBrightnessUI failed:', e); }
+  try { renderShortcuts(); } catch (e) { console.error('[NTP] renderShortcuts failed:', e); }
 
   // ── Reveal UI immediately — wallpaper swaps in underneath when ready ──
   // Blocking body.loaded on image decode was the main perceived delay.

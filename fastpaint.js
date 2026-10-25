@@ -34,4 +34,13 @@
     var meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.content = color;
   } catch (e) {}
+
+  // Fix #07c: if startup never reveals the page (storage hung, init threw),
+  // show it anyway after 2s — a plain visible page beats a blank one.
+  // Sits AFTER the catch so it schedules even when the block above throws.
+  setTimeout(function () {
+    if (document.body && !document.body.classList.contains('loaded')) {
+      document.body.classList.add('loaded');
+    }
+  }, 2000);
 })();
