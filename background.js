@@ -616,11 +616,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 // ═══════════════════════════════════════════════════════
 // NOTION SYNC — background.js
-// Push tab groups to a Notion database (debounced, push-only)
+// Mirror tab groups into a Notion database (upsert, push-only)
 // ═══════════════════════════════════════════════════════
 
 const NOTION_API     = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
+// group.id → page.id, scoped to the database it was built for, so renaming a
+// group updates its existing row instead of creating another one.
+const NOTION_MAP_KEY = 'notion_page_map';
 
 function _notionHeaders(token) {
   return {
@@ -630,40 +633,74 @@ function _notionHeaders(token) {
   };
 }
 
-// Query all pages in the database (up to 100) to detect name conflicts
+// Notion allows ~3 requests/second. Updating a page deletes one block per old
+// tab, so a burst can hit 429; retry those using Retry-After when provided.
+// (5xx is not retried: a create/append that actually succeeded would duplicate
+// a row or bullets on the retry.)
+async function _notionFetch(url, opts, retries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    const resp = await fetch(url, opts);
+    if (resp.ok) return resp;
+    if (resp.status === 429 && attempt < retries) {
+      const after = parseFloat(resp.headers && resp.headers.get('Retry-After'));
+      // Cap the wait: an hour-long Retry-After must not hang the sync chain.
+      const wait  = Number.isFinite(after) ? Math.min(after * 1000, 10000) : 1000 * (attempt + 1);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    let body = '';
+    try { body = await resp.text(); } catch (_) {}
+    const err = new Error(`Notion ${(opts && opts.method) || 'GET'} failed (${resp.status}): ${body}`);
+    err.status = resp.status;
+    throw err;
+  }
+}
+
+// Query every page in the database (needed only when seeding new group ids)
 async function _notionQueryDb(token, dbId) {
-  const resp = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
+  const results = [];
+  let cursor = null;
+  do {
+    const body = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    const resp = await _notionFetch(`${NOTION_API}/databases/${dbId}/query`, {
+      method:  'POST',
+      headers: _notionHeaders(token),
+      body:    JSON.stringify(body),
+    });
+    const data = await resp.json();
+    results.push(...(data.results || []));
+    cursor = data.has_more ? data.next_cursor : null;
+  } while (cursor);
+  return { results };
+}
+
+function _notionProperties(group, tabCount) {
+  return {
+    'Name':  { title:     [{ text: { content: (group.name || 'Unnamed').slice(0, 2000) } }] },
+    'Color': { rich_text: [{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
+    'Tabs':  { number:    tabCount },
+  };
+}
+
+async function _notionCreatePage(token, dbId, group, tabCount) {
+  const resp = await _notionFetch(`${NOTION_API}/pages`, {
     method:  'POST',
     headers: _notionHeaders(token),
-    body:    JSON.stringify({ page_size: 100 }),
+    body:    JSON.stringify({
+      parent:     { database_id: dbId },
+      properties: _notionProperties(group, tabCount),
+    }),
   });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Notion DB query failed (${resp.status}): ${body}`);
-  }
   return resp.json();
 }
 
-// Create one database page (row) for a group
-async function _notionCreatePage(token, dbId, group, tabCount, nameSuffix) {
-  const title = (group.name || 'Unnamed') + (nameSuffix || '');
-  const body = {
-    parent:     { database_id: dbId },
-    properties: {
-      'Name':  { title:    [{ text: { content: title.slice(0, 2000) } }] },
-      'Color': { rich_text:[{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
-      'Tabs':  { number:   tabCount },
-    },
-  };
-  const resp = await fetch(`${NOTION_API}/pages`, {
-    method:  'POST',
+async function _notionUpdatePage(token, pageId, group, tabCount) {
+  const resp = await _notionFetch(`${NOTION_API}/pages/${pageId}`, {
+    method:  'PATCH',
     headers: _notionHeaders(token),
-    body:    JSON.stringify(body),
+    body:    JSON.stringify({ properties: _notionProperties(group, tabCount) }),
   });
-  if (!resp.ok) {
-    const errBody = await resp.text();
-    throw new Error(`Notion create page failed (${resp.status}): ${errBody}`);
-  }
   return resp.json();
 }
 
@@ -695,25 +732,81 @@ async function _notionAppendTabs(token, pageId, tabs) {
 
   // Notion limits: 100 blocks per PATCH request
   for (let i = 0; i < children.length; i += 100) {
-    const chunk = children.slice(i, i + 100);
-    const resp = await fetch(`${NOTION_API}/blocks/${pageId}/children`, {
+    await _notionFetch(`${NOTION_API}/blocks/${pageId}/children`, {
       method:  'PATCH',
       headers: _notionHeaders(token),
-      body:    JSON.stringify({ children: chunk }),
+      body:    JSON.stringify({ children: children.slice(i, i + 100) }),
     });
-    if (!resp.ok) {
-      console.warn('[TGM Notion] append blocks failed:', resp.status, await resp.text());
-    }
   }
 }
 
-// ── Main sync: push all groups to Notion ──
+async function _notionGetChildren(token, pageId) {
+  const blocks = [];
+  let cursor = null;
+  do {
+    const q = `?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const resp = await _notionFetch(`${NOTION_API}/blocks/${pageId}/children${q}`, {
+      headers: _notionHeaders(token),
+    });
+    const data = await resp.json();
+    blocks.push(...(data.results || []));
+    cursor = data.has_more ? data.next_cursor : null;
+  } while (cursor);
+  return blocks;
+}
+
+function _notionBlockText(block) {
+  const type = block && block.type;
+  const rich = type && block[type] && block[type].rich_text;
+  if (!Array.isArray(rich)) return '';
+  return rich.map(x => (x && (x.plain_text || (x.text && x.text.content))) || '').join('');
+}
+
+// Make the page body match the group's current tabs. Only bulleted-list blocks
+// (the ones this integration writes) are replaced; other page content is kept.
+async function _notionReplaceTabs(token, pageId, tabs) {
+  const wanted   = (tabs || []).map(t => (t.title || t.url || 'Untitled') + ' — ' + (t.url || ''));
+  const children = await _notionGetChildren(token, pageId);
+  const ours     = children.filter(b => b && b.type === 'bulleted_list_item');
+  const current  = ours.map(_notionBlockText);
+  if (current.length === wanted.length && current.every((text, i) => text === wanted[i])) return;
+
+  for (const block of ours) {
+    // A failed delete would let the append duplicate bullets, so stop here and
+    // leave the old body for the next sync to retry.
+    await _notionFetch(`${NOTION_API}/blocks/${block.id}`, {
+      method:  'DELETE',
+      headers: _notionHeaders(token),
+    });
+  }
+  await _notionAppendTabs(token, pageId, tabs);
+}
+
+function _notionPageTitle(page) {
+  try {
+    return (page.properties.Name.title || [])
+      .map(t => (t && (t.plain_text || (t.text && t.text.content))) || '')
+      .join('').trim();
+  } catch (_) { return ''; }
+}
+
+// { v:1, dbId, pages:{ [groupId]: pageId } } — a map from another database is
+// ignored (its page ids are meaningless there).
+function _notionReadMap(raw, dbId) {
+  if (!raw || raw.dbId !== dbId || !raw.pages || typeof raw.pages !== 'object') return {};
+  const pages = {};
+  for (const id of Object.keys(raw.pages)) {
+    if (typeof raw.pages[id] === 'string') pages[id] = raw.pages[id];
+  }
+  return pages;
+}
+
+// ── Main sync: create missing rows, update existing ones ──
 async function notionSyncAllGroups() {
   const r = await chrome.storage.local.get([
-    'notion_token', 'notion_db_id', 'notion_sync_enabled', 'ntp_state',
+    'notion_token', 'notion_db_id', 'notion_sync_enabled', 'ntp_state', NOTION_MAP_KEY,
   ]).catch(() => ({}));
 
-  // Abort if sync is disabled
   if (!r.notion_sync_enabled) return { ok: true, count: 0, skipped: true };
 
   const token  = (r.notion_token || '').trim();
@@ -725,73 +818,158 @@ async function notionSyncAllGroups() {
   if (!token || !dbId) {
     return { ok: false, error: 'Notion token or Database ID not configured.' };
   }
+
+  const map = _notionReadMap(r[NOTION_MAP_KEY], dbId);
+  let mapDirty = false;
+
   if (groups.length === 0) {
+    if (Object.keys(map).length) {
+      await chrome.storage.local.set({ [NOTION_MAP_KEY]: { v: 1, dbId, pages: {} } }).catch(() => {});
+    }
     return { ok: true, count: 0 };
   }
 
-  // Fetch existing page names so we can detect conflicts
-  let existingNames = new Set();
-  try {
-    const existing = await _notionQueryDb(token, dbId);
-    for (const page of (existing.results || [])) {
-      try {
-        const raw = page.properties.Name.title[0].text.content;
-        if (raw) existingNames.add(raw.toLowerCase());
-      } catch (_) {}
+  // First run (or a group added after the map was built): adopt pages created
+  // by older versions by exact name instead of adding a duplicate row.
+  if (groups.some(g => !map[g.id])) {
+    let existing = [];
+    try {
+      existing = (await _notionQueryDb(token, dbId)).results || [];
+    } catch (err) {
+      return { ok: false, error: String(err) };
     }
-  } catch (err) {
-    return { ok: false, error: String(err) };
+    const used = new Set(Object.keys(map).map(id => map[id]));
+    const byName = new Map();
+    for (const page of existing) {
+      const title = _notionPageTitle(page).toLowerCase();
+      if (!title) continue;
+      if (!byName.has(title)) byName.set(title, []);
+      byName.get(title).push(page);
+    }
+    for (const group of groups) {
+      if (map[group.id]) continue;
+      const key = (group.name || 'Unnamed').trim().toLowerCase();
+      const match = (byName.get(key) || []).find(p => !used.has(p.id));
+      if (match) {
+        map[group.id] = match.id;
+        used.add(match.id);
+        mapDirty = true;
+      }
+    }
   }
 
   let synced = 0;
+  let firstError = null;
   for (const group of groups) {
+    const tabs = Array.isArray(group.tabs) ? group.tabs : [];
+    let pageId = map[group.id] || null;
+    let created = false;
     try {
-      const baseName   = (group.name || 'Unnamed').toLowerCase();
-      const nameSuffix = existingNames.has(baseName) ? ' New' : '';
-      const tabs       = group.tabs || [];
-
-      const page = await _notionCreatePage(token, dbId, group, tabs.length, nameSuffix);
-      await _notionAppendTabs(token, page.id, tabs);
-
-      // Register the newly created name so subsequent groups in this batch
-      // don't collide with each other either
-      existingNames.add((group.name || 'Unnamed').toLowerCase() + nameSuffix.toLowerCase());
+      if (pageId) {
+        try {
+          await _notionUpdatePage(token, pageId, group, tabs.length);
+        } catch (err) {
+          if (err && err.status === 404) { pageId = null; } // deleted in Notion → recreate
+          else throw err;
+        }
+      }
+      if (!pageId) {
+        const page = await _notionCreatePage(token, dbId, group, tabs.length);
+        pageId = page.id;
+        created = true;
+        map[group.id] = pageId;
+        mapDirty = true;
+      }
+      if (created) {
+        // New page: nothing to compare against yet.
+        await _notionAppendTabs(token, pageId, tabs);
+      } else {
+        await _notionReplaceTabs(token, pageId, tabs);
+      }
       synced++;
     } catch (err) {
+      if (!firstError) firstError = String((err && err.message) || err);
       console.warn('[TGM Notion] sync error for group:', group.name, err);
     }
   }
 
+  // Rows for deleted groups stay in Notion (nothing is ever deleted there), but
+  // their mappings are dropped so the map doesn't grow forever.
+  const live = new Set(groups.map(g => g.id));
+  for (const id of Object.keys(map)) {
+    if (!live.has(id)) { delete map[id]; mapDirty = true; }
+  }
+
+  if (mapDirty) {
+    try {
+      await chrome.storage.local.set({ [NOTION_MAP_KEY]: { v: 1, dbId, pages: map } });
+    } catch (err) {
+      console.warn('[TGM Notion] could not save page map:', err);
+    }
+  }
+
+  if (synced === 0 && firstError) return { ok: false, error: firstError };
   return { ok: true, count: synced };
 }
 
-// ── Debounced auto-sync: fires 3 s after the last state change ──
+// Only push when the visible group data changed. Runtime fields this worker
+// writes (active marks, chromeTabIds, removedTabIds) must not trigger a sync.
+function _notionGroupSig(groups) {
+  try {
+    return JSON.stringify((groups || []).map(g => ({
+      id:    g && g.id,
+      name:  (g && g.name) || '',
+      color: (g && g.color) || '',
+      type:  (g && g.type) || '',
+      tabs:  (g && Array.isArray(g.tabs) ? g.tabs : []).map(t => [
+        (t && t.title) || '', (t && t.url) || '',
+      ]),
+    })));
+  } catch (_) { return ''; }
+}
+
+function _notionGroupsChanged(ov, nv) {
+  return _notionGroupSig(ov && ov.tabGroups) !== _notionGroupSig(nv && nv.tabGroups);
+}
+
+// Serialize syncs so a debounced run and a manual "Sync Now" never create the
+// same page twice.
+let _notionSyncChain = Promise.resolve();
+function _runNotionSync() {
+  const run = _notionSyncChain.catch(() => {}).then(() => notionSyncAllGroups());
+  _notionSyncChain = run.catch(() => {});
+  return run;
+}
+
+// ── Debounced auto-sync: fires 3 s after the last relevant change ──
 let _notionDebounceTimer = null;
 function _scheduleNotionSync() {
   clearTimeout(_notionDebounceTimer);
   _notionDebounceTimer = setTimeout(() => {
-    notionSyncAllGroups()
+    _runNotionSync()
       .then(r => {
-        if (r && r.ok && !r.skipped && r.count > 0) {
-          console.log(`[TGM Notion] Auto-sync: ${r.count} group(s) pushed.`);
+        if (r && !r.ok && !r.skipped) console.warn('[TGM Notion] Auto-sync failed:', r.error);
+        else if (r && r.ok && !r.skipped && r.count > 0) {
+          console.log(`[TGM Notion] Auto-sync: ${r.count} group(s) synced.`);
         }
       })
       .catch(err => console.warn('[TGM Notion] Auto-sync error:', err));
   }, 3000);
 }
 
-// Hook into the existing storage.onChanged listener flow
-// (We add a SECOND storage.onChanged listener here — Chrome supports multiple)
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.ntp_state) {
-    _scheduleNotionSync();
-  }
+  if (area !== 'local') return;
+  const groupsChanged = changes.ntp_state && _notionGroupsChanged(
+    changes.ntp_state.oldValue, changes.ntp_state.newValue
+  );
+  const justEnabled = !!(changes.notion_sync_enabled && changes.notion_sync_enabled.newValue === true);
+  if (groupsChanged || justEnabled) _scheduleNotionSync();
 });
 
 // ── Respond to manual "Sync Now" message from newtab.js ──
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === 'NOTION_SYNC_NOW') {
-    notionSyncAllGroups()
+    _runNotionSync()
       .then(result => sendResponse(result))
       .catch(err   => sendResponse({ ok: false, error: String(err) }));
     return true; // keeps the message channel open for async response

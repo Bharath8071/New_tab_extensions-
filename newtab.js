@@ -579,11 +579,33 @@ let state = {
   wpBrightness:  -4
 };
 
+// Last wallpaper value this page committed to storage. saveState() uses it to
+// stamp only real wallpaper changes (see wallpaperStamp below).
+let _lastSavedWallpaper = null;
+
+function _nextWallpaperStamp() {
+  const prev = typeof state.wallpaperStamp === 'number' ? state.wallpaperStamp : 0;
+  const now  = Date.now();
+  return now > prev ? now : prev + 1;
+}
+
+// Same-marker replacements (upload→upload, GIF→GIF) change the image bytes but
+// not state.wallpaper, so their handlers call this right before saveState().
+function _bumpWallpaperStamp() {
+  state.wallpaperStamp = _nextWallpaperStamp();
+  _lastSavedWallpaper = state.wallpaper;
+}
+
 function loadState(cb) {
   // Fix #07a: cb must fire exactly once — startup (and the body.loaded reveal)
   // hangs on it, so success, early-return and throw paths all go through run().
   let _cbDone = false;
-  const run = () => { if (_cbDone) return; _cbDone = true; cb(); };
+  const run = () => {
+    if (_cbDone) return;
+    _cbDone = true;
+    _lastSavedWallpaper = state.wallpaper;
+    cb();
+  };
   chrome.storage.local.get(['ntp_state', 'ntp_wallpaper', 'ntp_wp_thumb'], r => {
     try {
       if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
@@ -698,6 +720,17 @@ function saveState() {
   const isUpload        = state.wallpaper === '__upload__';
   const isMarker        = isGif || isUpload;
   const isRealWallpaper = state.wallpaper && !isMarker;
+
+  // Real wallpaper changes get a new stamp here (monotonic, so two changes in
+  // the same millisecond still differ). Same-marker replacements keep
+  // state.wallpaper unchanged and call _bumpWallpaperStamp() where the new
+  // bytes are committed; unrelated saves stay quiet.
+  if (_lastSavedWallpaper === null) {
+    _lastSavedWallpaper = state.wallpaper;
+  } else if (state.wallpaper !== _lastSavedWallpaper) {
+    state.wallpaperStamp = _nextWallpaperStamp();
+    _lastSavedWallpaper = state.wallpaper;
+  }
 
   // Strip large base64 strings from ntp_state — keep markers or '' as-is
   const stateToSave = isRealWallpaper
@@ -2508,6 +2541,7 @@ loadState(async () => {
         try {
           await _idbSaveGif(arrayBuffer);
           state.wallpaper = '__gif__';
+          _bumpWallpaperStamp(); // new GIF bytes under the same marker
           saveState();
           _saveThumbForUpload(new Blob([arrayBuffer], { type: 'image/gif' }));
           await _applyGifFromIDB({ isSwitch: true });
@@ -2891,6 +2925,7 @@ loadState(async () => {
       // Set state to upload marker (no huge dataURL in chrome.storage)
       state.wallpaper = '__upload__';
       state.bgColor = '#000000';
+      _bumpWallpaperStamp(); // new image bytes under the same marker
       saveState();
 
       // Clear active states in panel
@@ -4612,7 +4647,6 @@ const TGM_EMPTY_TABS_HTML = `
     <path d="M9 21V9"/>
   </svg>
   <div class="tgm-empty-title">No tabs saved yet</div>
-  <div class="tgm-empty-desc">Open pages while Active to save them</div>
 `;
 
 function _tgmOpenDropdown(groupId, chipEl) {
@@ -4627,7 +4661,7 @@ function _tgmOpenDropdown(groupId, chipEl) {
   const dd = document.createElement('div');
   dd.className = 'tgm-dropdown tgm-dd-open';
 
-  // ── Header: dot + name & count + active toggle + rename + delete ──
+  // ── Header: dot + name + active toggle + rename + delete ──
   const header = document.createElement('div');
   header.className = 'tgm-dd-header';
 
@@ -4645,27 +4679,23 @@ function _tgmOpenDropdown(groupId, chipEl) {
   nameEl.className = 'tgm-dd-name';
   nameEl.textContent = group.name;
 
-  const tabCount = (group.tabs || []).length;
-  const countBadge = document.createElement('span');
-  countBadge.className = 'tgm-dd-badge';
-  countBadge.textContent = `${tabCount} tab${tabCount === 1 ? '' : 's'}`;
-
   titleWrap.appendChild(nameEl);
-  titleWrap.appendChild(countBadge);
 
   // Active / Inactive toggle button (with Native Tab Group sync)
+  // Pure icon toggle: ▶ starts collecting tabs here, ❚❚ pauses it. The green
+  // ring carries the active state; the group chip also shows an ACTIVE badge.
   const activeToggle = document.createElement('button');
-  activeToggle.className = 'tgm-active-toggle' + (group.isActive ? ' is-active' : '');
+  activeToggle.type = 'button';
+  activeToggle.className = 'tgm-active-toggle' + (group.isActive ? ' is-active' : ' is-play');
+  activeToggle.setAttribute('aria-pressed', group.isActive ? 'true' : 'false');
+  activeToggle.setAttribute('aria-label', group.isActive ? 'Pause group' : 'Activate group');
   activeToggle.title = group.isActive
-    ? 'Click to make Inactive'
-    : (isChromeGroupSyncEnabled() ? 'Click to make Active (links with native Chrome group)' : 'Click to make Active (automatically saves new tabs)');
+    ? 'Pause group — stop saving new tabs here'
+    : (isChromeGroupSyncEnabled() ? 'Play group — links with the native Chrome group' : 'Play group — saves new tabs here');
 
-  const statusDot = document.createElement('span');
-  statusDot.className = 'tgm-status-dot';
-  const statusText = document.createElement('span');
-  statusText.textContent = group.isActive ? 'Active' : 'Set Active';
-  activeToggle.appendChild(statusDot);
-  activeToggle.appendChild(statusText);
+  activeToggle.innerHTML = group.isActive
+    ? `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6.6" y="5" width="4" height="14" rx="1.5" fill="currentColor"/><rect x="13.4" y="5" width="4" height="14" rx="1.5" fill="currentColor"/></svg>`
+    : `<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13a1 1 0 0 0 1.53.85l9.9-6.5a1 1 0 0 0 0-1.7l-9.9-6.5A1 1 0 0 0 8 5.5z" fill="currentColor"/></svg>`;
 
   activeToggle.addEventListener('click', async e => {
     e.stopPropagation();
@@ -4815,8 +4845,6 @@ function _tgmOpenDropdown(groupId, chipEl) {
         // Update the open dropdown in place — no close/reopen, so no flicker
         row.remove();
         const left = (g.tabs || []).length;
-        const badge = ddEl && ddEl.querySelector('.tgm-dd-badge');
-        if (badge) badge.textContent = `${left} tab${left === 1 ? '' : 's'}`;
         if (left === 0 && ddEl) {
           const list = ddEl.querySelector('.tgm-dd-tabs');
           if (list) list.innerHTML = `<div class="tgm-dd-empty">${TGM_EMPTY_TABS_HTML}</div>`;
@@ -5759,27 +5787,246 @@ function _tgmStripRuntimeFields(groups) {
   } catch (_) { return groups || []; }
 }
 
+// ═══════════════════════════════════════════════════════
+//  CROSS-PAGE LIVE SYNC
+//  Every field of `state` except tabGroups (handled by _tgmMergeGroups below).
+//
+//  When ANOTHER new-tab page / the popup changes a field, this page copies the
+//  new value into its own `state` and redraws just that part. It never calls
+//  saveState() (receiving is read-only → no write loops), and because this
+//  page's copy is now current, its next save can no longer overwrite the other
+//  page's change with an old value.
+//
+//  A field is applied only if it differs from BOTH
+//    • its previous stored value (oldValue)  → so unrelated writes don't revert
+//      an edit this page has made but not saved yet (e.g. a slider mid-drag), and
+//    • this page's current value             → so our own saves are ignored.
+// ═══════════════════════════════════════════════════════
+function _sameJson(a, b) {
+  try { return JSON.stringify(a) === JSON.stringify(b); } catch (_) { return false; }
+}
+const _defaultShortcuts = () => [...TOP_DEFAULTS, ...EXTRA_DEFAULTS].slice(0, 20);
+
+// Redrawing the grid while a tile is dragged, a menu is open or the edit dialog
+// is open would break that interaction (or point it at a different tile).
+function _shortcutGridBusy() {
+  return !!(DND.active ||
+            (modalOverlay && modalOverlay.classList.contains('open')) ||
+            document.querySelector('.sc-dropdown.open'));
+}
+
+function _applyBgColorOnly(color) {
+  // Colour only: no image repaint (a preset pick changes colour AND wallpaper
+  // together; the wallpaper part is handled by _scheduleWallpaperReconcile).
+  document.documentElement.style.setProperty('--bg-color', color);
+  document.documentElement.style.backgroundColor = color;
+  const bg = document.getElementById('bg');
+  if (bg) bg.style.backgroundColor = color;
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) themeMeta.content = color;
+}
+
+// ── Shortcuts (list + on/off toggle) ──
+let _scSyncTimer = null;
+function _applyShortcutsFrom(st) {
+  const list = Array.isArray(st.allShortcuts) ? st.allShortcuts.slice(0, 20) : _defaultShortcuts(); // missing = popup "reset"
+  const show = typeof st.showShortcuts === 'boolean' ? st.showShortcuts : state.showShortcuts;
+  if (_sameJson(list, state.allShortcuts) && show === state.showShortcuts) return;
+  state.allShortcuts  = list;
+  state.showShortcuts = show;
+  syncToggles();
+  renderShortcuts();
+}
+function _scheduleShortcutsSync() {
+  // Busy (dragging / menu / dialog open): wait, then re-read STORAGE (not an old
+  // event value). If the user finished by editing here, storage already holds
+  // their edit, nothing differs and nothing is applied.
+  clearTimeout(_scSyncTimer);
+  _scSyncTimer = setTimeout(async () => {
+    const r = await chrome.storage.local.get('ntp_state').catch(() => null);
+    const st = r && r.ntp_state;
+    if (!st) return;
+    if (_shortcutGridBusy()) { _scheduleShortcutsSync(); return; }
+    _applyShortcutsFrom(st);
+  }, 300);
+}
+
+// ── Wallpaper (preset URL / uploaded image / GIF / none) ──
+// Stored in two places (ntp_state.wallpaper marker + ntp_wallpaper URL) and
+// written in two steps, so events can arrive in either order. Wait a moment,
+// then read the final stored result and make this page match it.
+let _wpSyncTimer = null;
+function _scheduleWallpaperReconcile() {
+  clearTimeout(_wpSyncTimer);
+  const seen = state.wallpaper;
+  _wpSyncTimer = setTimeout(async () => {
+    const r = await chrome.storage.local.get(['ntp_state', 'ntp_wallpaper']).catch(() => null);
+    if (!r || !r.ntp_state) return;
+    if (state.wallpaper !== seen) return;          // changed on THIS page meanwhile: that choice wins
+    const marker = r.ntp_state.wallpaper;
+    const target = (marker === '__gif__' || marker === '__upload__')
+      ? marker
+      : (r.ntp_wallpaper || (typeof marker === 'string' ? marker : ''));
+    // A new stamp means the wallpaper was replaced even if the marker/URL is
+    // unchanged (upload→upload, GIF→GIF). Compare against OUR stamp so the
+    // echo of this page's own save — and replayed events — stay no-ops.
+    const stamp = r.ntp_state.wallpaperStamp;
+    const stampChanged = typeof stamp === 'number' && stamp !== state.wallpaperStamp;
+    if (target === state.wallpaper && !stampChanged) return;
+    _applyWallpaperFromOutside(target, stamp);
+  }, 150);
+}
+
+async function _applyWallpaperFromOutside(target, stamp) {
+  const gen = ++_wallpaperGen;                      // cancels any older in-flight wallpaper loader
+  const stillCurrent = () => gen === _wallpaperGen && state.wallpaper === target;
+  state.wallpaper = target;
+  // Adopt the source's stamp and baseline: otherwise our next unrelated
+  // saveState() would mint a new stamp and bounce the change back.
+  if (typeof stamp === 'number') state.wallpaperStamp = stamp;
+  _lastSavedWallpaper = target;
+  syncCustomPanelActive();
+
+  // none / solid colour: applyBg() frees both blob URLs and clears the image
+  if (!target) { applyBg(); return; }
+
+  // animated GIF: bytes live in the shared IndexedDB
+  if (target === '__gif__') {
+    if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+    await _applyGifFromIDB({ isSwitch: true });
+    return;
+  }
+
+  // everything below paints a still image: release a previous GIF blob
+  const dropGif = () => { if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; } };
+
+  // uploaded image: blob lives in the shared IndexedDB cache
+  if (target === '__upload__') {
+    const blobUrl = await _applyUploadFromCache('custom_upload');
+    if (!blobUrl) return;                            // not cached: keep what is shown, write nothing
+    if (!stillCurrent()) {
+      // A newer choice won while we were loading — never leave this URL installed
+      // (applyBg() early-returns while _uploadBlobUrl is set, see #17).
+      if (_uploadBlobUrl === blobUrl) { URL.revokeObjectURL(blobUrl); _uploadBlobUrl = null; }
+      return;
+    }
+    let ok = true;
+    try { await _predecode(blobUrl); } catch (_) { ok = false; }
+    if (!stillCurrent() || !ok) {
+      if (_uploadBlobUrl === blobUrl) { URL.revokeObjectURL(blobUrl); _uploadBlobUrl = null; }
+      return;
+    }
+    dropGif();
+    _paintBgSharp(blobUrl);
+    return;
+  }
+
+  // preset / remote / data URL: prefer the IndexedDB copy, else load it directly
+  try {
+    const cached = await _cacheGet(target);
+    if (!stillCurrent()) return;
+    if (cached && cached.blob) {
+      if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+      const blobUrl = URL.createObjectURL(cached.blob);
+      _uploadBlobUrl = blobUrl;
+      let ok = true;
+      try { await _predecode(blobUrl); } catch (_) { ok = false; }
+      if (!stillCurrent() || !ok) {
+        // Stale or undecodable: release it so a later applyBg() can't paint it.
+        if (_uploadBlobUrl === blobUrl) { URL.revokeObjectURL(blobUrl); _uploadBlobUrl = null; }
+        return;
+      }
+      dropGif();
+      _paintBgSharp(blobUrl);
+    } else {
+      const ok = await _preloadRemoteUrl(target);
+      if (!stillCurrent()) return;
+      if (!ok) return;                              // offline/dead URL: keep the current picture
+      if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+      dropGif();
+      _paintBgSharp(target);
+    }
+  } catch (err) {
+    // A failed cache lookup must never paint a dead URL — keep the current
+    // picture; the next event or reload will reconcile.
+    console.warn('[NTP] wallpaper sync failed:', err);
+  }
+}
+
+function _extSyncFromEvent(changes) {
+  const nv = changes.ntp_state && changes.ntp_state.newValue;
+  const ov = changes.ntp_state && changes.ntp_state.oldValue;
+
+  if (nv) {
+    // true only when another page changed this field (see header comment)
+    const changed = k => !_sameJson(nv[k], ov && ov[k]) && !_sameJson(nv[k], state[k]);
+
+    // shortcuts: allShortcuts may legitimately be MISSING (popup reset) → defaults
+    if (changed('allShortcuts') || (typeof nv.showShortcuts === 'boolean' && changed('showShortcuts'))) {
+      if (_shortcutGridBusy()) _scheduleShortcutsSync();
+      else _applyShortcutsFrom(nv);
+    }
+
+    // brightness (don't fight a slider the user is holding)
+    if (typeof nv.wpBrightness === 'number' && changed('wpBrightness')) {
+      if (brightnessSlider && brightnessSlider.matches(':active')) {
+        // user is dragging here: their value wins, will be saved on release
+      } else {
+        state.wpBrightness = nv.wpBrightness;
+        syncBrightnessUI();
+        applyBg();
+      }
+    }
+
+    // solid background colour
+    if (typeof nv.bgColor === 'string' && changed('bgColor')) {
+      state.bgColor = nv.bgColor;
+      _applyBgColorOnly(nv.bgColor);
+      syncCustomPanelActive();
+    }
+
+    // values with no UI of their own: just keep this page's copy current
+    if (Array.isArray(nv.searchHistory) && changed('searchHistory')) state.searchHistory = nv.searchHistory;
+    if (typeof nv.syncChromeGroups === 'boolean' && changed('syncChromeGroups')) {
+      state.syncChromeGroups = nv.syncChromeGroups;
+      renderGroupBar();          // chip labels/tooltips depend on the sync mode
+    }
+
+    // tab-group bar visibility (was applied only AFTER the echo check below,
+    // so a change from another page could be dropped as a false "echo")
+    if (typeof nv.showTabGroups === 'boolean' && changed('showTabGroups')) {
+      state.showTabGroups = nv.showTabGroups;
+      syncTabGroupsVisibility();
+    }
+  }
+
+  // wallpaper: either key changed, or it was replaced with the same marker/URL
+  if (changes.ntp_wallpaper ||
+      (nv && ov && (nv.wallpaper !== ov.wallpaper || nv.wallpaperStamp !== ov.wallpaperStamp))) {
+    _scheduleWallpaperReconcile();
+  }
+}
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
 
-  // Fix New-H: propagate wallpaper changes written by another tab
-  if (changes.ntp_wallpaper) {
-    const newUrl = changes.ntp_wallpaper.newValue;
-    // Only act if it's a real URL change and we're not already showing an
-    // upload/gif (those have their own restore paths on next open)
-    if (newUrl && newUrl !== state.wallpaper &&
-        !['__gif__', '__upload__'].includes(state.wallpaper)) {
-      state.wallpaper = newUrl;
-      // Fix #17: the old preset's blob URL is still held in _uploadBlobUrl, and
-      // applyBg() returns early while it is set (its "active blob" branch), so
-      // the new wallpaper never painted here — state said newUrl, screen still
-      // showed the old image, and B's next save wrote the stale view back.
-      // Cancel any in-flight loader and drop the blob first; applyBg then
-      // falls through and paints newUrl.
-      _wallpaperGen++;
-      if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
-      applyBg();
-    }
+  // The whole ntp_state key was removed (storage.clear() or a manual reset).
+  // Reload so every surface is rebuilt from defaults; keeping stale in-memory
+  // state would write the old groups/shortcuts straight back on the next save.
+  if (changes.ntp_state && !changes.ntp_state.newValue && changes.ntp_state.oldValue) {
+    try { if (typeof location !== 'undefined' && location.reload) location.reload(); } catch (_) {}
+    return;
+  }
+
+  // Live sync of everything except tabGroups (must run BEFORE the tabGroups
+  // echo check below, which compares tabGroups only).
+  if (changes.ntp_state || changes.ntp_wallpaper) {
+    try { _extSyncFromEvent(changes); } catch (err) { console.warn('[NTP] live sync failed:', err); }
+  }
+
+  // Notion settings live in their own keys (not in ntp_state).
+  if (changes.notion_token || changes.notion_db_id || changes.notion_sync_enabled) {
+    try { _applyNotionUIFromChanges(changes); } catch (err) { console.warn('[NTP] notion UI sync failed:', err); }
   }
 
   if (!changes.ntp_state || !changes.ntp_state.newValue) return;
@@ -5801,10 +6048,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (matched) return;
 
-  if (nv.showTabGroups !== undefined && nv.showTabGroups !== state.showTabGroups) {
-    state.showTabGroups = nv.showTabGroups;
-    syncTabGroupsVisibility();
-  }
+  // (showTabGroups is now applied by _extSyncFromEvent above)
   _tgmMergeGroups(nv.tabGroups);
   renderGroupBar();
   if (_tgmOpenDd) {
@@ -5869,6 +6113,41 @@ initTabGroupsSidePanelControls();
 // NOTION SYNC — Settings UI (newtab.js)
 // ═══════════════════════════════════════════════════════
 
+// Reflect Notion settings changed in another new-tab page. They live in their
+// own storage keys, not in ntp_state, so _extSyncFromEvent doesn't see them.
+// Never clobbers a field the user is typing in, or a save status being shown
+// by a save/toggle that this page itself just started.
+function _applyNotionUIFromChanges(changes) {
+  const toggle = document.getElementById('toggle-notion-sync');
+  const creds  = document.getElementById('notion-credentials');
+  if (!toggle || !creds) return;
+
+  const saveBtn  = document.getElementById('notion-save-btn');
+  const statusEl = document.getElementById('notion-status');
+
+  if (changes.notion_sync_enabled) {
+    const enabled = !!changes.notion_sync_enabled.newValue;
+    const wasOn   = toggle.classList.contains('on');
+    toggle.className = 'toggle' + (enabled ? ' on' : '');
+    creds.style.display = enabled ? 'flex' : 'none';
+    // Only announce changes made elsewhere (own toggle/save already says it).
+    if (statusEl && wasOn !== enabled && !(saveBtn && saveBtn.disabled)) {
+      statusEl.style.color = '#9aa0a6';
+      statusEl.textContent = enabled ? 'Auto-sync is active.' : 'Notion sync disabled.';
+    }
+  }
+
+  const tokenInput = document.getElementById('notion-token-input');
+  if (tokenInput && changes.notion_token && document.activeElement !== tokenInput && tokenInput.dataset.dirty !== '1') {
+    tokenInput.value = changes.notion_token.newValue || '';
+  }
+
+  const dbInput = document.getElementById('notion-db-input');
+  if (dbInput && changes.notion_db_id && document.activeElement !== dbInput && dbInput.dataset.dirty !== '1') {
+    dbInput.value = changes.notion_db_id.newValue || '';
+  }
+}
+
 function initNotionSyncUI() {
   const toggle     = document.getElementById('toggle-notion-sync');
   const credsDiv   = document.getElementById('notion-credentials');
@@ -5877,6 +6156,11 @@ function initNotionSyncUI() {
   const saveBtn    = document.getElementById('notion-save-btn');
   const statusEl   = document.getElementById('notion-status');
   if (!toggle || !credsDiv) return;
+
+  // A field with unsaved edits is off-limits to remote updates (see
+  // _applyNotionUIFromChanges). Saving this page's own values clears the flag.
+  tokenInput.addEventListener('input', () => { tokenInput.dataset.dirty = '1'; });
+  dbInput.addEventListener('input',    () => { dbInput.dataset.dirty    = '1'; });
 
   // Add focus-glow style for inputs
   const _ns = document.createElement('style');
@@ -5946,6 +6230,8 @@ function initNotionSyncUI() {
       notion_db_id:        dbId,
       notion_sync_enabled: true,
     });
+    delete tokenInput.dataset.dirty;
+    delete dbInput.dataset.dirty;
     toggle.className = 'toggle on';
     credsDiv.style.display = 'flex';
 
