@@ -6208,9 +6208,9 @@ function initNotionSyncUI() {
       tokenInput.focus();
       return;
     }
-    if (!token.startsWith('secret_')) {
+    if (!token.startsWith('ntn_') && !token.startsWith('secret_')) {
       statusEl.style.color = '#fbbc04';
-      statusEl.textContent = '⚠ Token should start with "secret_".';
+      statusEl.textContent = '⚠ Token should start with "ntn_" (or "secret_" for legacy tokens).';
       tokenInput.focus();
       return;
     }

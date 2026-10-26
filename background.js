@@ -675,31 +675,74 @@ async function _notionQueryDb(token, dbId) {
   return { results };
 }
 
-function _notionProperties(group, tabCount) {
+function _notionProperties(group, tabCount, titleProp = 'Name') {
   return {
-    'Name':  { title:     [{ text: { content: (group.name || 'Unnamed').slice(0, 2000) } }] },
+    [titleProp]:   { title:     [{ text: { content: (group.name || 'Unnamed').slice(0, 2000) } }] },
     'Color': { rich_text: [{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
     'Tabs':  { number:    tabCount },
   };
 }
 
-async function _notionCreatePage(token, dbId, group, tabCount) {
+// Make sure the target database has the properties this extension writes.
+// Missing "Color" (rich_text) / "Tabs" (number) are created via PATCH database,
+// and the actual title-property name is resolved from the schema (Notion lets
+// users rename it, so it isn't always "Name").
+async function _notionEnsureSchema(token, dbId) {
+  const resp = await fetch(`${NOTION_API}/databases/${dbId}`, {
+    method:  'GET',
+    headers: _notionHeaders(token),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    const err = new Error(`Notion GET failed (${resp.status}): ${body}`);
+    err.status = resp.status;
+    throw err;
+  }
+  const db = await resp.json();
+  const props = (db && db.properties) || {};
+
+  const missing = {};
+  if (!props.Color) missing.Color = { rich_text: {} };
+  if (!props.Tabs)  missing.Tabs  = { number:    {} };
+
+  if (Object.keys(missing).length) {
+    const patchResp = await fetch(`${NOTION_API}/databases/${dbId}`, {
+      method:  'PATCH',
+      headers: _notionHeaders(token),
+      body:    JSON.stringify({ properties: missing }),
+    });
+    if (!patchResp.ok) {
+      const body = await patchResp.text().catch(() => '');
+      const err = new Error(`Notion PATCH database failed (${patchResp.status}): ${body}`);
+      err.status = patchResp.status;
+      throw err;
+    }
+  }
+
+  // Resolve the title property (title type), falling back to "Name".
+  for (const [name, prop] of Object.entries(props)) {
+    if (prop && prop.type === 'title') return name;
+  }
+  return 'Name';
+}
+
+async function _notionCreatePage(token, dbId, group, tabCount, titleProp) {
   const resp = await _notionFetch(`${NOTION_API}/pages`, {
     method:  'POST',
     headers: _notionHeaders(token),
     body:    JSON.stringify({
       parent:     { database_id: dbId },
-      properties: _notionProperties(group, tabCount),
+      properties: _notionProperties(group, tabCount, titleProp),
     }),
   });
   return resp.json();
 }
 
-async function _notionUpdatePage(token, pageId, group, tabCount) {
+async function _notionUpdatePage(token, pageId, group, tabCount, titleProp) {
   const resp = await _notionFetch(`${NOTION_API}/pages/${pageId}`, {
     method:  'PATCH',
     headers: _notionHeaders(token),
-    body:    JSON.stringify({ properties: _notionProperties(group, tabCount) }),
+    body:    JSON.stringify({ properties: _notionProperties(group, tabCount, titleProp) }),
   });
   return resp.json();
 }
@@ -819,6 +862,15 @@ async function notionSyncAllGroups() {
     return { ok: false, error: 'Notion token or Database ID not configured.' };
   }
 
+  // Make sure the database has the properties we write, and learn the real
+  // title-property name before creating/updating any rows.
+  let titleProp = 'Name';
+  try {
+    titleProp = await _notionEnsureSchema(token, dbId);
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+
   const map = _notionReadMap(r[NOTION_MAP_KEY], dbId);
   let mapDirty = false;
 
@@ -867,14 +919,14 @@ async function notionSyncAllGroups() {
     try {
       if (pageId) {
         try {
-          await _notionUpdatePage(token, pageId, group, tabs.length);
+          await _notionUpdatePage(token, pageId, group, tabs.length, titleProp);
         } catch (err) {
           if (err && err.status === 404) { pageId = null; } // deleted in Notion → recreate
           else throw err;
         }
       }
       if (!pageId) {
-        const page = await _notionCreatePage(token, dbId, group, tabs.length);
+        const page = await _notionCreatePage(token, dbId, group, tabs.length, titleProp);
         pageId = page.id;
         created = true;
         map[group.id] = pageId;

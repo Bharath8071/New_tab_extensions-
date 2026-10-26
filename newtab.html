@@ -464,6 +464,8 @@
       transition: transform .25s cubic-bezier(.4, 0, .2, 1);
       overflow-y: auto;
       will-change: transform;
+      --cp-text-shadow: 0 1px 2px rgba(0, 0, 0, .8), 0 0 8px rgba(0, 0, 0, .15);
+      --cp-icon-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, .8)) drop-shadow(0 0 4px rgba(0, 0, 0, .15));
     }
 
     #cust-panel::-webkit-scrollbar {
@@ -492,13 +494,15 @@
       align-items: center;
       justify-content: space-between;
       padding: 20px 20px 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, .5);
+      border-bottom: 1px solid rgba(255, 255, 255, .3);
     }
 
     .cp-title {
       font-size: 16px;
       font-weight: 600;
       color: #e8eaed;
+      line-height: 1.25;
+      text-shadow: var(--cp-text-shadow);
     }
 
     .cp-close {
@@ -508,31 +512,56 @@
       background: none;
       border: none;
       cursor: pointer;
-      color: #9aa0a6;
+      color: #e8eaed;
       font-size: 20px;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background .15s;
+      transition: background .15s, color .15s;
     }
 
     .cp-close:hover {
       background: rgba(255, 255, 255, .1);
+      color: #fff;
     }
 
     .cp-section {
+      position: relative;
       padding: 16px 20px;
-      border-bottom: 1px solid rgba(255, 255, 255, .08);
+    }
+
+    .cp-section::after {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 20px;
+      right: 20px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .2), transparent);
     }
 
     .cp-section-title {
       font-size: 12px;
       font-weight: 600;
-      color: #9aa0a6;
+      color: #e8eaed;
       letter-spacing: .08em;
       text-transform: uppercase;
       margin-bottom: 12px;
+      text-shadow: var(--cp-text-shadow);
     }
+
+    /* Text shadows for readable panel text */
+    #cust-panel button,
+    .cp-brightness-control span {
+      text-shadow: var(--cp-text-shadow);
+    }
+
+    /* Matching shadow for icon glyphs */
+    .cp-nav-label svg {
+    filter:
+        drop-shadow(0 0 4px rgba(0, 0, 0, .20))
+        drop-shadow(0 1px 2px rgba(0, 0, 0, .3));
+}
 
     /* ── Settings entry row + settings sub-view ── */
     .cp-nav-row {
@@ -545,18 +574,36 @@
       cursor: pointer;
       padding: 2px 0;
       font-family: inherit;
-      color: #e8eaed;
+      /* color: #e8eaed;   */
       font-size: 14px;
+    }
+
+    #cp-open-settings .cp-nav-label svg {
+      transition: transform .3s cubic-bezier(.2, .8, .2, 1);
+    }
+
+    #cp-open-settings:hover .cp-nav-label svg {
+      transform: rotate(24deg);
+    }
+
+    #cp-open-settings .cp-nav-label > span {
+      color: #e8eaed;
+      transition: color .2s, transform .2s;
+    }
+
+    #cp-open-settings:hover .cp-nav-label > span {
+      color: #fff;
+      transform: translateX(1px);
     }
 
     .cp-nav-label {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 6px;
     }
 
     .cp-nav-arrow {
-      color: #9aa0a6;
+      color: #e8eaed;
       font-size: 16px;
       line-height: 1;
     }
@@ -572,25 +619,39 @@
       background: none;
       border: none;
       cursor: pointer;
-      color: #9aa0a6;
-      font-size: 20px;
+      color: #e8eaed;
+      font-size: 24px;
       line-height: 1;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background .15s;
+      transition: background .15s, color .15s;
       padding: 0;
     }
 
     .cp-back:hover {
       background: rgba(255, 255, 255, .1);
-      color: #e8eaed;
+      color: #fff;
     }
 
     .cp-header-title {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 2  px;
+      min-height: 32px;
+    }
+
+    #cp-settings-view {
+      width: 100%;
+      box-sizing: border-box;
+      color: #e8eaed;
+    }
+
+    #cp-settings-view .cp-title,
+    #cp-settings-view .cp-toggle-label,
+    #cp-settings-view label {
+      color: #e8eaed;
+      text-shadow: var(--cp-text-shadow);
     }
 
     /* color swatches */
@@ -704,18 +765,19 @@
       padding: 10px;
       border-radius: 10px;
       border: 1.5px dashed rgba(255, 255, 255, .3);
-      background: none;
-      color: #9aa0a6;
+      background: rgba(255, 255, 255, .08);
+      color: #e8eaed;
       font-size: 13px;
       font-family: inherit;
       cursor: pointer;
-      transition: border-color .15s, color .15s;
+      transition: background-color .15s, border-color .15s, box-shadow .15s;
       margin-top: 8px;
     }
 
     .cp-upload-btn:hover {
-      border-color: #1a73e8;
-      color: #e8eaed;
+      background: rgba(255, 255, 255, .16);
+      border-color: rgba(255, 255, 255, .65);
+      box-shadow: 0 0 10px rgba(255, 255, 255, .08);
     }
 
     /* shortcuts toggle */
@@ -2788,8 +2850,8 @@
     <div class="cp-section">
       <button class="cp-nav-row" id="cp-open-settings">
         <span class="cp-nav-label">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          Settings
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
         </span>
         <span class="cp-nav-arrow">›</span>
       </button>
@@ -2815,19 +2877,21 @@
       </button>
 
       <!-- Brightness slider -->
-      <div style="margin-top:14px;">
+      <div class="cp-brightness-control" style="margin-top:14px;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
           <span
-            style="font-size:12px;font-weight:600;color:#9aa0a6;letter-spacing:.08em;text-transform:uppercase;">Brightness</span>
+            style="font-size:12px;font-weight:600;color:#e8eaed;letter-spacing:.08em;text-transform:uppercase;">Brightness</span>
           <span id="cp-brightness-val"
             style="font-size:12px;color:#e8eaed;font-weight:600;min-width:28px;text-align:right;">-4</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <span style="font-size:11px;color:#9aa0a6;">Dark</span>
+          <!-- <span style="font-size:11px;">Dark</span> -->
+          <span style="font-size:11px;color:#e8eaed;">Dark</span>
           <input id="cp-brightness" type="range" min="-10" max="10" step="1" value="-4" style="flex:1;height:4px;appearance:none;-webkit-appearance:none;
                  background:linear-gradient(to right,#1a73e8 0%,#1a73e8 50%,rgba(255,255,255,0.15) 50%,rgba(255,255,255,0.15) 100%);
                  border-radius:2px;outline:none;cursor:pointer;" />
-          <span style="font-size:11px;color:#9aa0a6;">Bright</span>
+          <span style="font-size:11px;color:#e8eaed;">Bright</span>
+          <!-- <span style="font-size:11px;color:#cbced1;">Bright</span> -->
         </div>
       </div>
     </div>
@@ -2837,7 +2901,11 @@
    <div id="cp-settings-view" style="display:none">
     <div class="cp-header">
       <span class="cp-header-title">
-        <button class="cp-back" id="cp-settings-back" title="Back">‹</button>
+        <button class="cp-back" id="cp-settings-back" title="Back">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
         <span class="cp-title">Settings</span>
       </span>
       <button class="cp-close" id="cp-settings-x" title="Back to Customize">✕</button>
@@ -2858,9 +2926,12 @@
     <div class="cp-section" id="notion-sync-section" style="margin-top:4px;">
       <div class="cp-toggle-row" style="margin-bottom:0;align-items:center;">
         <span class="cp-toggle-label" style="display:flex;align-items:center;gap:7px;">
+          <!-- Notion icon (commented out) -->
+          <!--
           <svg width="13" height="13" viewBox="0 0 24 24" fill="#9aa0a6" aria-hidden="true" style="flex:none;margin-top:1px;">
             <path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.14c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z"/>
           </svg>
+          -->
           Notion Sync
         </span>
         <button class="toggle" id="toggle-notion-sync" title="Enable Notion Sync"></button>
@@ -2869,11 +2940,11 @@
       <!-- Credentials (shown only when toggle is ON) -->
       <div id="notion-credentials" style="display:none;flex-direction:column;gap:10px;margin-top:14px;">
         <div>
-          <label for="notion-token-input" style="display:block;font-size:11px;font-weight:600;color:#9aa0a6;letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;">Integration Token</label>
+          <label for="notion-token-input" style="display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;">Integration Token</label>
           <input
             id="notion-token-input"
             type="password"
-            placeholder="secret_xxxxxxxxxxxx"
+            placeholder="ntn_xxxxxxxxxxxx"
             autocomplete="off"
             spellcheck="false"
             style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);
@@ -2882,7 +2953,7 @@
           />
         </div>
         <div>
-          <label for="notion-db-input" style="display:block;font-size:11px;font-weight:600;color:#9aa0a6;letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;">Database ID</label>
+          <label for="notion-db-input" style="display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;">Database ID</label>
           <input
             id="notion-db-input"
             type="text"
