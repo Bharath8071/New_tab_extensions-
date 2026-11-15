@@ -18,6 +18,12 @@ const EXTRA_DEFAULTS = [
 
 const UI_ALPHA = 0.25; // 0.0 = fully transparent, 1.0 = fully opaque
 
+// ── Engine menu theme ──
+// true  → solid black theme (current default)
+// false → extension glass theme: rgba(32,33,36,0.25) + backdrop blur(8px),
+//         matching the search bar / suggestions glass
+const enginTheme = false;
+
 // Load-stage timing (diagnostic): window.__ntpPerf in console shows where cold ms go
 function _perfMark(name) {
   try {
@@ -573,6 +579,10 @@ window.addEventListener('pagehide', () => {
 let state = {
   allShortcuts:   [...TOP_DEFAULTS, ...EXTRA_DEFAULTS].slice(0, 20),
   showShortcuts:  true,
+  showSearchBar:  true,
+  showShortcutNames: true,
+  lockShortcuts:  false,
+  searchEngine:  'google',
   bgColor:    '#202124',
   wallpaper:  DEFAULT_WALLPAPER,
   searchHistory: [],
@@ -1320,7 +1330,6 @@ function bindAcPositionListeners() {
 const acStyle = document.createElement('style');
 acStyle.textContent = `
 #ac-dropdown {
-  display: none;
   position: fixed;
   /* left, top, width set by positionAcDropdown() */
 
@@ -1333,8 +1342,16 @@ acStyle.textContent = `
   max-height: min(420px, calc(100vh - 120px));
   overflow-x: hidden;
   overflow-y: auto;
+
+  /* open/close animation — same timing/effect as #engine-menu */
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(-6px) scale(.92);
+  transform-origin: 50% 0;
+  pointer-events: none;
+  transition: opacity .15s ease, transform .15s cubic-bezier(.25, .8, .3, 1), visibility .15s;
 }
-#ac-dropdown.open { display: block; }
+#ac-dropdown.open { visibility: visible; opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
 
 .ac-item {
   display: flex; align-items: center; gap: 12px;
@@ -1622,6 +1639,92 @@ searchBar.addEventListener('keydown', e => {
   }
 });
 
+// ─── Search engines (badge + picker) ───
+// Picking an engine changes both the badge icon and where searches go.
+// 'default' = Chrome's own default search provider (chrome.search API).
+const SEARCH_ENGINES = {
+  google:  { name: 'Google',  url: q => 'https://www.google.com/search?q=' + encodeURIComponent(q) },
+  bing:    { name: 'Bing',    url: q => 'https://www.bing.com/search?q=' + encodeURIComponent(q) },
+  brave:   { name: 'Brave',   url: q => 'https://search.brave.com/search?q=' + encodeURIComponent(q) },
+  duck:    { name: 'Duck',    url: q => 'https://duckduckgo.com/?q=' + encodeURIComponent(q) },
+  default: { name: 'Default', url: null }
+};
+const ENGINE_ICONS = {
+  google: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z"/></svg>',
+  bing: '<svg viewBox="213 138.2 598 747.6"><path fill="currentColor" d="m435 332 76.2 165.1 112.4 50.7-405.7 213.4 166.3-148v-422.5l-171.2-52.5v628.4l170.2 119.2 427.8-255v-183.7z"/></svg>',
+  brave: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.68 0l2.096 2.38s1.84-.512 2.709.358c.868.87 1.584 1.638 1.584 1.638l-.562 1.381.715 2.047s-2.104 7.98-2.35 8.955c-.486 1.919-.818 2.66-2.198 3.633-1.38.972-3.884 2.66-4.293 2.916-.409.256-.92.692-1.38.692-.46 0-.97-.436-1.38-.692a185.796 185.796 0 01-4.293-2.916c-1.38-.973-1.712-1.714-2.197-3.633-.247-.975-2.351-8.955-2.351-8.955l.715-2.047-.562-1.381s.716-.768 1.585-1.638c.868-.87 2.708-.358 2.708-.358L8.321 0h7.36zm-3.679 14.936c-.14 0-1.038.317-1.758.69-.72.373-1.242.637-1.409.742-.167.104-.065.301.087.409.152.107 2.194 1.69 2.393 1.866.198.175.489.464.687.464.198 0 .49-.29.688-.464.198-.175 2.24-1.759 2.392-1.866.152-.108.254-.305.087-.41-.167-.104-.689-.368-1.41-.741-.72-.373-1.617-.69-1.757-.69zm0-11.278s-.409.001-1.022.206-1.278.46-1.584.46c-.307 0-2.581-.434-2.581-.434S4.119 7.152 4.119 7.849c0 .697.339.881.68 1.243l2.02 2.149c.192.203.59.511.356 1.066-.235.555-.58 1.26-.196 1.977.384.716 1.042 1.194 1.464 1.115.421-.08 1.412-.598 1.776-.834.364-.237 1.518-1.19 1.518-1.554 0-.365-1.193-1.02-1.413-1.168-.22-.15-1.226-.725-1.247-.95-.02-.227-.012-.293.284-.851.297-.559.831-1.304.742-1.8-.089-.495-.95-.753-1.565-.986-.615-.232-1.799-.671-1.947-.74-.148-.068-.11-.133.339-.175.448-.043 1.719-.212 2.292-.052.573.16 1.552.403 1.632.532.079.13.149.134.067.579-.081.445-.5 2.581-.541 2.96-.04.38-.12.63.288.724.409.094 1.097.256 1.333.256s.924-.162 1.333-.256c.408-.093.329-.344.288-.723-.04-.38-.46-2.516-.541-2.961-.082-.445-.012-.45.067-.579.08-.129 1.059-.372 1.632-.532.573-.16 1.845.009 2.292.052.449.042.487.107.339.175-.148.069-1.332.508-1.947.74-.615.233-1.476.49-1.565.986-.09.496.445 1.241.742 1.8.297.558.304.624.284.85-.02.226-1.026.802-1.247.95-.22.15-1.413.804-1.413 1.169 0 .364 1.154 1.317 1.518 1.554.364.236 1.355.755 1.776.834.422.079 1.08-.4 1.464-1.115.384-.716.039-1.422-.195-1.977-.235-.555.163-.863.355-1.066l2.02-2.149c.341-.362.68-.546.68-1.243 0-.697-2.695-3.96-2.695-3.96s-2.274.436-2.58.436c-.307 0-.972-.256-1.585-.461-.613-.205-1.022-.206-1.022-.206z"/></svg>',
+  duck: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm0 23C5.925 23 1 18.074 1 12S5.926 1 12 1s11 4.925 11 11-4.925 11-11 11zm10.219-11c0 4.805-3.317 8.833-7.786 9.925-.27-.521-.53-1.017-.749-1.438.645.249 1.93.718 2.208.615.376-.144.282-3.149-.14-3.245-.338-.075-1.632.837-2.141 1.209l.034.156c.078.397.144.993.03 1.247-.001.004-.002.01-.004.013a.218.218 0 0 1-.068.088c-.284.188-1.081.284-1.503.188a.516.516 0 0 1-.064-.02c-.694.396-2.01 1.109-2.25.971-.329-.188-.377-2.676-.329-3.288.035-.46 1.653.286 2.442.679.174-.163.602-.272.98-.31-.57-1.389-.99-2.977-.733-4.105 0 .002.002.002.002.002.356.248 2.73 1.05 3.91 1.027 1.18-.024 3.114-.743 2.903-1.323-.212-.58-2.135.51-4.142.324-1.486-.138-1.748-.804-1.42-1.29.414-.611 1.168.116 2.411-.256 1.245-.371 2.987-1.035 3.632-1.397 1.494-.833-.625-1.177-1.125-.947-.474.22-2.123.637-2.889.82.428-1.516-.603-4.149-1.757-5.3-.376-.376-.951-.612-1.603-.736-.25-.344-.654-.671-1.225-.977a5.772 5.772 0 0 0-3.595-.584l-.024.004-.034.004.004.002c-.148.028-.237.08-.357.098.148.016.705.276 1.057.418-.174.068-.412.108-.596.184a.828.828 0 0 0-.204.056c-.173.08-.303.375-.3.515.84-.086 2.082-.026 2.991.246-.644.09-1.235.258-1.661.482-.016.008-.03.018-.048.028-.054.02-.106.042-.152.066-1.367.72-1.971 2.405-1.611 4.424.323 1.824 1.665 8.088 2.29 11.064-3.973-1.4-6.822-5.186-6.822-9.639C1.781 6.356 6.356 1.781 12 1.781S22.219 6.356 22.219 12zM9.095 9.581a.758.758 0 1 0 0 1.516.758.758 0 0 0 0-1.516zm.338.702a.196.196 0 1 1 0-.392.196.196 0 0 1 0 .392zm4.724-1.043a.65.65 0 1 0 0 1.299.65.65 0 0 0 0-1.3zm.29.601a.168.168 0 1 1 0-.336.168.168 0 0 1 0 .336zM9.313 8.146s-.571-.26-1.125.09c-.554.348-.534.704-.534.704s-.294-.656.49-.978c.786-.32 1.17.184 1.17.184zm5.236-.052s-.41-.234-.73-.23c-.654.008-.831.296-.831.296s.11-.688.945-.55a.84.84 0 0 1 .616.484z"/></svg>',
+  default: '<svg viewBox="0 0 24 24" fill="none"><path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+};
+
+// Menu is portaled to body (like #ac-dropdown) and positioned off the badge.
+const _engineMenu = document.createElement('div');
+_engineMenu.id = 'engine-menu';
+(function buildEngineMenu() {
+  for (const [key, eng] of Object.entries(SEARCH_ENGINES)) {
+    const row = document.createElement('div');
+    row.className = 'eng-row';
+    row.dataset.engine = key;
+    row.title = key === 'default' ? 'Default' : eng.name;
+    row.innerHTML = ENGINE_ICONS[key];
+    row.addEventListener('click', () => {
+      state.searchEngine = key;
+      saveState();
+      syncEngineBadge();
+      closeEngineMenu();
+    });
+    _engineMenu.appendChild(row);
+  }
+})();
+document.body.appendChild(_engineMenu);
+
+// Theme follows enginTheme (top of file): true = solid black, false = glass
+function applyEnginTheme() {
+  _engineMenu.classList.toggle('eng-glass', enginTheme !== true);
+}
+applyEnginTheme();
+
+function syncEngineBadge() {
+  const key = SEARCH_ENGINES[state.searchEngine] ? state.searchEngine : 'google';
+  const badge = document.getElementById('engine-badge');
+  if (badge) {
+    badge.innerHTML = ENGINE_ICONS[key];
+    badge.title = 'Search engine: ' + (key === 'default' ? 'Default' : SEARCH_ENGINES[key].name);
+  }
+  _engineMenu.querySelectorAll('.eng-row').forEach(r => r.classList.toggle('active', r.dataset.engine === key));
+  const input = document.getElementById('search-bar');
+  if (input) input.placeholder = key === 'default' ? 'Search or type a URL' : 'Search ' + SEARCH_ENGINES[key].name + ' or type a URL';
+}
+
+let _engineMenuOpen = false;
+function openEngineMenu() {
+  const badge = document.getElementById('engine-badge');
+  if (!badge) return;
+  closeDropdown(); // mutual exclusion: picker and suggestions never show together
+  const r = badge.getBoundingClientRect();
+  _engineMenu.style.left = Math.round(r.left - 6) + 'px';
+  _engineMenu.style.top  = Math.round(r.bottom + 6) + 'px';
+  _engineMenu.classList.add('open');
+  _engineMenuOpen = true;
+}
+function closeEngineMenu() {
+  if (!_engineMenuOpen) return;
+  _engineMenu.classList.remove('open');
+  _engineMenuOpen = false;
+}
+document.getElementById('engine-badge').addEventListener('click', e => {
+  e.stopPropagation();
+  if (_engineMenuOpen) closeEngineMenu(); else openEngineMenu();
+});
+// Close on pointerdown (not click): the fade-out must start the instant you
+// press the input/anything else, so it runs together with the search
+// dropdown's fade-in instead of a beat behind it.
+document.addEventListener('pointerdown', e => {
+  if (_engineMenuOpen && !_engineMenu.contains(e.target) && !e.target.closest('#engine-badge')) closeEngineMenu();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeEngineMenu(); });
+window.addEventListener('resize', closeEngineMenu);
+
 function navigateTo(q) {
   if (!q) return;
 
@@ -1639,9 +1742,23 @@ function navigateTo(q) {
     /^(https?:\/\/|www\.)/i.test(q) ||
     /\.\w{2,}(\/|$)/.test(q);
 
-  window.location.href = isUrl
-    ? (q.startsWith('http') ? q : 'https://' + q)
-    : `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+  if (isUrl) {
+    window.location.href = q.startsWith('http') ? q : 'https://' + q;
+    return;
+  }
+
+  // Query → the selected search engine
+  const key = SEARCH_ENGINES[state.searchEngine] ? state.searchEngine : 'google';
+  if (key === 'default') {
+    try {
+      if (chrome.search && chrome.search.query) {
+        chrome.search.query({ text: q, disposition: 'CURRENT_TAB' });
+        return;
+      }
+    } catch (_) { /* fall through to Google */ }
+  }
+  const eng = SEARCH_ENGINES[key];
+  window.location.href = (eng.url || SEARCH_ENGINES.google.url)(q);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1818,6 +1935,7 @@ function getRowFromY(cy) {
 
 // Called from buildTile's pointerdown
 function dndStart(e, tile, globalIdx, onActivated) {
+  if (state.lockShortcuts === true) return; // locked: tiles can't be moved
   const startX = e.clientX, startY = e.clientY;
   DND.srcIdx = globalIdx;
   DND.srcTile = tile;
@@ -2084,8 +2202,8 @@ function renderShortcuts() {
     grid.appendChild(tile);
   });
 
-  // Show add button only if less than 20 total items
-  if (state.allShortcuts.length < 20) {
+  // Show add button only if less than 20 total items (never when locked)
+  if (state.allShortcuts.length < 20 && state.lockShortcuts !== true) {
     const add = document.createElement('div');
     add.className = 'sc-tile sc-add-tile';
     const addCircle = document.createElement('div');
@@ -2178,12 +2296,61 @@ document.addEventListener('click', (event) => {
 
 function syncToggles() {
   document.getElementById('toggle-shortcuts').className = 'toggle' + (state.showShortcuts ? ' on' : '');
+  // shortcuts-section (Show names / Lock) collapses while shortcuts are off —
+  // the DOM stays, only the UI hides; visibility follows state.showShortcuts,
+  // which is already persisted + cross-page synced via saveState().
+  const sec = document.getElementById('shortcuts-section');
+  if (sec) sec.classList.toggle('cp-sec-open', state.showShortcuts !== false);
 }
 document.getElementById('toggle-shortcuts').onclick = function() {
   state.showShortcuts = !state.showShortcuts;
-  saveState(); 
-  syncToggles(); 
+  saveState();
+  syncToggles();
   renderShortcuts();
+};
+
+// ─── Search Bar Visibility (Side Panel Toggle) ───
+// Coupled with shortcuts: search bar OFF → shortcuts OFF and the "Show
+// shortcuts" row collapses; search bar ON → the row drops open and
+// shortcuts are enabled again.
+function syncSearchBarVisibility() {
+  const isEnabled = state.showSearchBar !== false; // default is true
+  const wrap = document.getElementById('search-wrap');
+  if (wrap) wrap.style.display = isEnabled ? '' : 'none';
+  const toggle = document.getElementById('toggle-search-bar');
+  if (toggle) toggle.className = 'toggle' + (isEnabled ? ' on' : '');
+  const row = document.getElementById('cp-row-shortcuts');
+  if (row) row.classList.toggle('cp-open', isEnabled);
+}
+document.getElementById('toggle-search-bar').onclick = function() {
+  const enabled = state.showSearchBar !== false;
+  state.showSearchBar = !enabled;
+  state.showShortcuts = !enabled; // coupled (see above)
+  saveState();
+  syncSearchBarVisibility();
+  syncToggles();
+  renderShortcuts();
+};
+
+// ─── Shortcut display options (Settings panel) ───
+function syncShortcutOptions() {
+  const namesToggle = document.getElementById('toggle-shortcut-names');
+  if (namesToggle) namesToggle.className = 'toggle' + (state.showShortcutNames !== false ? ' on' : '');
+  const lockToggle = document.getElementById('toggle-lock-shortcuts');
+  if (lockToggle) lockToggle.className = 'toggle' + (state.lockShortcuts === true ? ' on' : '');
+  const grid = document.getElementById('shortcuts-grid');
+  if (grid) grid.classList.toggle('sc-hide-names', state.showShortcutNames === false);
+}
+document.getElementById('toggle-shortcut-names').onclick = function() {
+  state.showShortcutNames = state.showShortcutNames === false;
+  saveState();
+  syncShortcutOptions();
+};
+document.getElementById('toggle-lock-shortcuts').onclick = function() {
+  state.lockShortcuts = state.lockShortcuts !== true;
+  saveState();
+  syncShortcutOptions();
+  renderShortcuts(); // the "+" add tile follows the lock
 };
 
 const colorsEl = document.getElementById('cp-colors');
@@ -2379,6 +2546,16 @@ loadState(async () => {
   // longer be skipped — one failing call must never leave a blank new tab.
   try { applyBg(true); } catch (e) { console.error('[NTP] applyBg failed:', e); }
   try { syncToggles(); } catch (e) { console.error('[NTP] syncToggles failed:', e); }
+  try { syncSearchBarVisibility(); } catch (e) { console.error('[NTP] syncSearchBarVisibility failed:', e); }
+  // Coupled rule: search bar OFF → shortcuts OFF (normalize any legacy state)
+  if (state.showSearchBar === false && state.showShortcuts !== false) {
+    state.showShortcuts = false;
+    saveState();
+    syncToggles();
+    renderShortcuts();
+  }
+  try { syncShortcutOptions(); } catch (e) { console.error('[NTP] syncShortcutOptions failed:', e); }
+  try { syncEngineBadge(); } catch (e) { console.error('[NTP] syncEngineBadge failed:', e); }
   try { syncBrightnessUI(); } catch (e) { console.error('[NTP] syncBrightnessUI failed:', e); }
   try { renderShortcuts(); } catch (e) { console.error('[NTP] renderShortcuts failed:', e); }
 
@@ -3664,9 +3841,10 @@ function _tgmCloseDropdown() {
   clearTimeout(_tgmHoverOpenTimer);
   clearTimeout(_tgmHoverCloseTimer);
   if (_tgmOpenDd) {
-    _tgmOpenDd.ddEl.classList.remove('tgm-dd-open');
-    _tgmOpenDd.ddEl.remove();
+    const el = _tgmOpenDd.ddEl;
     _tgmOpenDd = null;
+    el.classList.remove('tgm-dd-open'); // fades/scales out — same as search dropdowns
+    setTimeout(() => el.remove(), 160); // detach after the .15s transition finishes
   }
 }
 
@@ -4259,7 +4437,7 @@ function renderGroupBar() {
 // ─── Build & show the dropdown panel for a NOTE ───
 function _tgmOpenNoteDropdown(group, chipEl) {
   const dd = document.createElement('div');
-  dd.className = 'tgm-dropdown tgm-dropdown-note tgm-dd-open';
+  dd.className = 'tgm-dropdown tgm-dropdown-note';
 
   // Ensure fields exist
   group.noteMode = group.noteMode || 'checklist';
@@ -4635,6 +4813,11 @@ function _tgmOpenNoteDropdown(group, chipEl) {
   dd.style.left = Math.min(Math.max(10, chipRect.left), window.innerWidth - 350) + 'px';
   dd.style.top  = (chipRect.bottom + 6) + 'px';
 
+  // Open transition (same fade+scale as the search dropdowns); reflow first so
+  // the hidden state is committed before .tgm-dd-open lands
+  dd.getBoundingClientRect();
+  dd.classList.add('tgm-dd-open');
+
   _tgmOpenDd = { chipEl, ddEl: dd, groupId: group.id };
 }
 
@@ -4649,6 +4832,234 @@ const TGM_EMPTY_TABS_HTML = `
   <div class="tgm-empty-title">No tabs saved yet</div>
 `;
 
+// ─── Sub-group helpers ─────────────────────────────────────────────────────
+// Sub-groups live at group.subGroups = [{ id, name, tabs:[] }]
+// Each sub-group maps to a sub-folder inside the group's bookmark folder.
+
+function _tgmGetSubGroup(groupId, subId) {
+  const g = _tgmGetGroup(groupId);
+  return g && Array.isArray(g.subGroups) ? g.subGroups.find(s => s.id === subId) : null;
+}
+
+async function _tgmAddSubGroup(groupId, name) {
+  const g = _tgmGetGroup(groupId);
+  if (!g) return null;
+  g.subGroups = g.subGroups || [];
+  const sub = { id: 'sg_' + Date.now(), name: name.trim() || 'Sub-group', tabs: [] };
+  g.subGroups.push(sub);
+  await saveState();
+  return sub;
+}
+
+async function _tgmDeleteSubGroup(groupId, subId) {
+  const g = _tgmGetGroup(groupId);
+  if (!g || !Array.isArray(g.subGroups)) return;
+  g.subGroups = g.subGroups.filter(s => s.id !== subId);
+  await saveState();
+}
+
+async function _tgmRenameSubGroup(groupId, subId, newName) {
+  const s = _tgmGetSubGroup(groupId, subId);
+  if (!s) return;
+  s.name = newName.trim() || s.name;
+  await saveState();
+}
+
+async function _tgmOpenSubGroupInNewWindow(subGroup) {
+  if (!subGroup) return;
+  const urls = (subGroup.tabs || []).map(t => t.url).filter(Boolean);
+  if (urls.length === 0) {
+    _tgmShowToast(`"${subGroup.name}" is empty!`);
+    return;
+  }
+  const [first, ...rest] = urls;
+  const win = await chrome.windows.create({ url: first, focused: true });
+  for (const url of rest) {
+    await chrome.tabs.create({ url, windowId: win.id, active: false }).catch(() => {});
+  }
+  _tgmShowToast(`Opened "${subGroup.name}" with ${urls.length} tab(s) in a new window.`);
+}
+
+// ─── Drill into a sub-group: replace dropdown body with sub-group tabs ──────
+function _tgmDrillIntoSubGroup(dd, group, groupId, sub) {
+  // Hide the main body (sub-group list + main tab list + actions)
+  const subgroupsWrap = dd.querySelector('.tgm-subgroups-wrap');
+  const mainTabList   = dd.querySelector('.tgm-dd-tabs');
+  const actions       = dd.querySelector('.tgm-dd-actions');
+  if (subgroupsWrap) subgroupsWrap.style.display = 'none';
+  if (mainTabList)   mainTabList.style.display   = 'none';
+  if (actions)       actions.style.display       = 'none';
+
+  // ── Sub-view: back header + sub-group tabs ──
+  const subView = document.createElement('div');
+  subView.className = 'tgm-subgroup-drillview';
+  subView.style.cssText = 'display:flex;flex-direction:column;min-height:0;flex:1;';
+
+  // Back header
+  const backBar = document.createElement('div');
+  backBar.style.cssText =
+    'display:flex;align-items:center;justify-content:space-between;' +
+    'padding:6px 10px 6px 12px;border-top:1px solid rgba(255,255,255,0.08);' +
+    'border-bottom:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.03);';
+
+  const subTitle = document.createElement('span');
+  subTitle.style.cssText = 'font-size:12px;font-weight:700;color:#e8eaed;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;';
+  subTitle.textContent = sub.name;
+
+  const backBtn = document.createElement('button');
+  backBtn.style.cssText =
+    'flex:none;display:flex;align-items:center;gap:4px;padding:3px 10px;border-radius:6px;border:none;' +
+    'background:rgba(255,255,255,0.07);color:#bdc1c6;font-size:11px;font-weight:600;cursor:pointer;' +
+    'transition:background .15s;margin-left:8px;';
+  backBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg> Back`;
+  backBtn.title = 'Back to group';
+  backBtn.addEventListener('mouseenter', () => { backBtn.style.background = 'rgba(255,255,255,0.13)'; });
+  backBtn.addEventListener('mouseleave', () => { backBtn.style.background = 'rgba(255,255,255,0.07)'; });
+  backBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    subView.remove();
+    if (subgroupsWrap) subgroupsWrap.style.display = '';
+    if (mainTabList)   mainTabList.style.display   = '';
+    if (actions)       actions.style.display       = '';
+  });
+
+  backBar.appendChild(subTitle);
+  backBar.appendChild(backBtn);
+  subView.appendChild(backBar);
+
+  // Sub-group tab list — same styling as .tgm-dd-tabs rows
+  const subTabList = document.createElement('div');
+  subTabList.className = 'tgm-dd-tabs';
+
+  const subTabs = Array.isArray(sub.tabs) ? sub.tabs : [];
+  if (subTabs.length === 0) {
+    const emptyMsg = document.createElement('div');
+    emptyMsg.className = 'tgm-dd-empty';
+    emptyMsg.style.cssText = 'padding:14px 12px;font-size:11px;color:#5f6368;text-align:center;';
+    emptyMsg.textContent = 'No tabs yet. Add bookmarks to this sub-folder in Chrome.';
+    subTabList.appendChild(emptyMsg);
+  } else {
+    for (const tab of subTabs) {
+      const row = document.createElement('div');
+      row.className = 'tgm-tab-row';
+
+      const fav = document.createElement('img');
+      fav.className = 'tgm-tab-favicon';
+      fav.alt = '';
+      fav.src = tab.favicon || `https://www.google.com/s2/favicons?sz=16&domain_url=${encodeURIComponent(tab.url)}`;
+      fav.onerror = () => { fav.style.display = 'none'; };
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'tgm-tab-title';
+      titleSpan.textContent = tab.title || tab.url;
+      titleSpan.title = tab.url;
+
+      row.addEventListener('click', () => { window.location.href = tab.url; });
+      row.appendChild(fav);
+      row.appendChild(titleSpan);
+      subTabList.appendChild(row);
+    }
+  }
+
+  subView.appendChild(subTabList);
+  dd.appendChild(subView);
+}
+
+// ─── Render sub-groups inside the open dropdown (ABOVE the main tab list) ───
+function _tgmRenderSubGroups(tabList, group, groupId, dd) {
+  const subs = Array.isArray(group.subGroups) ? group.subGroups : [];
+  if (subs.length === 0) return; // nothing to show — omit section entirely
+
+  const wrap = document.createElement('div');
+  wrap.className = 'tgm-subgroups-wrap';
+  wrap.style.cssText = 'display:flex;flex-direction:column;margin:0;padding:0;';
+
+  // ── One row per sub-group, styled like a tab row ──
+  for (const sub of subs) {
+    const row = document.createElement('div');
+    row.className = 'tgm-tab-row tgm-subgroup-row';
+    row.style.cursor = 'pointer';
+
+    // Folder icon (replaces favicon)
+    const icon = document.createElement('span');
+    icon.style.cssText = 'flex:none;display:flex;align-items:center;color:#9aa0a6;width:16px;justify-content:center;';
+    icon.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'tgm-tab-title';
+    nameSpan.textContent = sub.name;
+
+    // Tab count badge
+    const badge = document.createElement('span');
+    badge.style.cssText =
+      'flex:none;font-size:10px;color:#5f6368;margin-left:auto;padding-right:2px;white-space:nowrap;';
+    badge.textContent = `${(sub.tabs || []).length}`;
+
+    // Chevron arrow →
+    const arrow = document.createElement('span');
+    arrow.style.cssText = 'flex:none;display:flex;align-items:center;color:#5f6368;margin-left:4px;';
+    arrow.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+
+    // Context buttons (rename / delete) — visible on hover
+    const ctxWrap = document.createElement('span');
+    ctxWrap.style.cssText = 'flex:none;display:flex;align-items:center;gap:2px;margin-left:4px;opacity:0;transition:opacity .15s;';
+    ctxWrap.className = 'tgm-subgroup-ctx';
+
+    const renBtn = document.createElement('button');
+    renBtn.style.cssText = 'padding:2px;border:none;background:transparent;color:#9aa0a6;cursor:pointer;display:flex;align-items:center;border-radius:4px;transition:color .15s;';
+    renBtn.title = 'Rename';
+    renBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
+    renBtn.addEventListener('mouseenter', () => { renBtn.style.color = '#e8eaed'; });
+    renBtn.addEventListener('mouseleave', () => { renBtn.style.color = '#9aa0a6'; });
+    renBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const newName = prompt('Rename sub-group:', sub.name);
+      if (!newName || !newName.trim()) return;
+      await _tgmRenameSubGroup(groupId, sub.id, newName);
+      nameSpan.textContent = newName.trim();
+      sub.name = newName.trim();
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.style.cssText = 'padding:2px;border:none;background:transparent;color:#9aa0a6;cursor:pointer;display:flex;align-items:center;border-radius:4px;transition:color .15s;';
+    delBtn.title = 'Delete';
+    delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+    delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#ea4335'; });
+    delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#9aa0a6'; });
+    delBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm(`Delete "${sub.name}"?`)) return;
+      await _tgmDeleteSubGroup(groupId, sub.id);
+      row.remove();
+      if (!wrap.querySelector('.tgm-subgroup-row')) wrap.remove();
+    });
+
+    ctxWrap.appendChild(renBtn);
+    ctxWrap.appendChild(delBtn);
+
+    // Show context buttons on row hover
+    row.addEventListener('mouseenter', () => { ctxWrap.style.opacity = '1'; });
+    row.addEventListener('mouseleave', () => { ctxWrap.style.opacity = '0'; });
+
+    row.appendChild(icon);
+    row.appendChild(nameSpan);
+    row.appendChild(badge);
+    row.appendChild(ctxWrap);
+    row.appendChild(arrow);
+
+    // Click → drill into sub-group
+    row.addEventListener('click', e => {
+      if (e.target.closest('.tgm-subgroup-ctx')) return;
+      const targetDd = dd || (tabList && tabList.closest ? tabList.closest('.tgm-dropdown') : null);
+      _tgmDrillIntoSubGroup(targetDd, group, groupId, sub);
+    });
+
+    wrap.appendChild(row);
+  }
+
+  tabList.appendChild(wrap);
+}
+
 function _tgmOpenDropdown(groupId, chipEl) {
   const group = (state.tabGroups || []).find(g => g.id === groupId);
   if (!group) return;
@@ -4659,7 +5070,7 @@ function _tgmOpenDropdown(groupId, chipEl) {
   }
 
   const dd = document.createElement('div');
-  dd.className = 'tgm-dropdown tgm-dd-open';
+  dd.className = 'tgm-dropdown';
 
   // ── Header: dot + name + active toggle + rename + delete ──
   const header = document.createElement('div');
@@ -4801,11 +5212,17 @@ function _tgmOpenDropdown(groupId, chipEl) {
   const tabList = document.createElement('div');
   tabList.className = 'tgm-dd-tabs';
 
+  // ── Sub-groups rendered at the top of tab list (seamless flow, zero gap) ──
+  _tgmRenderSubGroups(tabList, group, groupId, dd);
+
+  const hasSubs = Array.isArray(group.subGroups) && group.subGroups.length > 0;
   if (!group.tabs || group.tabs.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'tgm-dd-empty';
-    empty.innerHTML = TGM_EMPTY_TABS_HTML;
-    tabList.appendChild(empty);
+    if (!hasSubs) {
+      const empty = document.createElement('div');
+      empty.className = 'tgm-dd-empty';
+      empty.innerHTML = TGM_EMPTY_TABS_HTML;
+      tabList.appendChild(empty);
+    }
   } else {
     group.tabs.forEach((tab, idx) => {
       const row = document.createElement('div');
@@ -4845,7 +5262,8 @@ function _tgmOpenDropdown(groupId, chipEl) {
         // Update the open dropdown in place — no close/reopen, so no flicker
         row.remove();
         const left = (g.tabs || []).length;
-        if (left === 0 && ddEl) {
+        const subsLeft = (g.subGroups || []).length;
+        if (left === 0 && subsLeft === 0 && ddEl) {
           const list = ddEl.querySelector('.tgm-dd-tabs');
           if (list) list.innerHTML = `<div class="tgm-dd-empty">${TGM_EMPTY_TABS_HTML}</div>`;
         }
@@ -4926,6 +5344,11 @@ function _tgmOpenDropdown(groupId, chipEl) {
   const chipRect = chipEl.getBoundingClientRect();
   dd.style.left = Math.min(Math.max(10, chipRect.left), window.innerWidth - 330) + 'px';
   dd.style.top  = (chipRect.bottom + 6) + 'px';
+
+  // Open transition (same fade+scale as the search dropdowns); reflow first so
+  // the hidden state is committed before .tgm-dd-open lands
+  dd.getBoundingClientRect();
+  dd.classList.add('tgm-dd-open');
 
   _tgmOpenDd = { chipEl, ddEl: dd, groupId };
 }
@@ -5998,6 +6421,33 @@ function _extSyncFromEvent(changes) {
       state.showTabGroups = nv.showTabGroups;
       syncTabGroupsVisibility();
     }
+
+    // search-bar visibility (+ its coupled shortcuts state/row)
+    if (typeof nv.showSearchBar === 'boolean' && changed('showSearchBar')) {
+      const enabled = nv.showSearchBar !== false;
+      state.showSearchBar = nv.showSearchBar;
+      state.showShortcuts = enabled; // coupled (see syncSearchBarVisibility)
+      syncSearchBarVisibility();
+      syncToggles();
+      renderShortcuts();
+    }
+
+    // shortcut display options (names + lock)
+    if (typeof nv.showShortcutNames === 'boolean' && changed('showShortcutNames')) {
+      state.showShortcutNames = nv.showShortcutNames;
+      syncShortcutOptions();
+    }
+    if (typeof nv.lockShortcuts === 'boolean' && changed('lockShortcuts')) {
+      state.lockShortcuts = nv.lockShortcuts;
+      syncShortcutOptions();
+      renderShortcuts(); // the "+" add tile follows the lock
+    }
+
+    // search engine (badge + query routing)
+    if (typeof nv.searchEngine === 'string' && changed('searchEngine')) {
+      state.searchEngine = SEARCH_ENGINES[nv.searchEngine] ? nv.searchEngine : 'google';
+      syncEngineBadge();
+    }
   }
 
   // wallpaper: either key changed, or it was replaced with the same marker/URL
@@ -6087,10 +6537,8 @@ function setTabGroupsVisibility(enable) {
   syncTabGroupsVisibility();
   if (enable) {
     renderGroupBar();
-    _tgmShowToast('Tab Groups bar enabled.');
   } else {
     _tgmCloseDropdown();
-    _tgmShowToast('Tab Groups bar disabled.');
   }
 }
 
@@ -6129,7 +6577,7 @@ function _applyNotionUIFromChanges(changes) {
     const enabled = !!changes.notion_sync_enabled.newValue;
     const wasOn   = toggle.classList.contains('on');
     toggle.className = 'toggle' + (enabled ? ' on' : '');
-    creds.style.display = enabled ? 'flex' : 'none';
+    creds.classList.toggle('cp-open', enabled);
     // Only announce changes made elsewhere (own toggle/save already says it).
     if (statusEl && wasOn !== enabled && !(saveBtn && saveBtn.disabled)) {
       statusEl.style.color = '#9aa0a6';
@@ -6180,7 +6628,7 @@ function initNotionSyncUI() {
     if (r.notion_token) tokenInput.value = r.notion_token;
     if (r.notion_db_id) dbInput.value    = r.notion_db_id;
     toggle.className = 'toggle' + (enabled ? ' on' : '');
-    credsDiv.style.display = enabled ? 'flex' : 'none';
+    credsDiv.classList.toggle('cp-open', enabled);
     if (enabled) statusEl.textContent = 'Auto-sync is active.';
   });
 
@@ -6188,7 +6636,7 @@ function initNotionSyncUI() {
   toggle.addEventListener('click', () => {
     const nowEnabled = !toggle.classList.contains('on');
     toggle.className = 'toggle' + (nowEnabled ? ' on' : '');
-    credsDiv.style.display = nowEnabled ? 'flex' : 'none';
+    credsDiv.classList.toggle('cp-open', nowEnabled);
     chrome.storage.local.set({ notion_sync_enabled: nowEnabled });
     statusEl.style.color = '#9aa0a6';
     statusEl.textContent = nowEnabled ? 'Auto-sync enabled.' : 'Notion sync disabled.';
@@ -6233,7 +6681,7 @@ function initNotionSyncUI() {
     delete tokenInput.dataset.dirty;
     delete dbInput.dataset.dirty;
     toggle.className = 'toggle on';
-    credsDiv.style.display = 'flex';
+    credsDiv.classList.add('cp-open');
 
     // Ask background.js to sync immediately
     chrome.runtime.sendMessage({ type: 'NOTION_SYNC_NOW' }, resp => {
@@ -6244,8 +6692,13 @@ function initNotionSyncUI() {
         return;
       }
       if (resp && resp.ok) {
-        statusEl.style.color = '#34a853';
-        statusEl.textContent = `✓ Synced ${resp.count} group(s) to Notion.`;
+        if (resp.failed && resp.failed > 0) {
+          statusEl.style.color = '#fbbc04';
+          statusEl.textContent = `⚠ Synced ${resp.count} group(s), but ${resp.failed} failed (${resp.firstError || 'check console'}).`;
+        } else {
+          statusEl.style.color = '#34a853';
+          statusEl.textContent = `✓ Synced ${resp.count} group(s) to Notion.`;
+        }
       } else {
         statusEl.style.color = '#ea4335';
         statusEl.textContent = '✗ ' + (resp && resp.error ? resp.error : 'Unknown error. Check token & DB ID.');
@@ -6253,9 +6706,106 @@ function initNotionSyncUI() {
       setTimeout(() => {
         statusEl.style.color = '#9aa0a6';
         statusEl.textContent = resp && resp.ok ? 'Auto-sync is active.' : '';
-      }, 5000);
+      }, 6000);
     });
   });
 }
 
 initNotionSyncUI();
+
+// ─── Bookmark Sync UI ───────────────────────────────────────────
+// Mirrors Notion Sync UI: toggle + manual Sync Now button.
+// The actual sync logic runs in background.js.
+
+function initBookmarkSyncUI() {
+  const toggle    = document.getElementById('toggle-bookmark-sync');
+  const details   = document.getElementById('bookmark-sync-details');
+  const statusEl  = document.getElementById('bookmark-sync-status');
+  const syncBtn   = document.getElementById('bookmark-sync-now-btn');
+  if (!toggle || !details) return;
+
+  // Add hover style for Sync Now button
+  const _bs = document.createElement('style');
+  _bs.textContent = `
+    #bookmark-sync-now-btn:hover  { background: #2d9142 !important; }
+    #bookmark-sync-now-btn:active { transform: scale(0.97); }
+  `;
+  document.head.appendChild(_bs);
+
+  // ── Load saved state ──
+  chrome.storage.local.get(['bm_sync_enabled'], r => {
+    const enabled = !!r.bm_sync_enabled;
+    toggle.className = 'toggle' + (enabled ? ' on' : '');
+    details.classList.toggle('cp-open', enabled);
+    if (enabled && statusEl) statusEl.textContent = 'Auto-sync is active.';
+  });
+
+  // ── Toggle on/off ──
+  toggle.addEventListener('click', () => {
+    const nowEnabled = !toggle.classList.contains('on');
+    toggle.className = 'toggle' + (nowEnabled ? ' on' : '');
+    details.classList.toggle('cp-open', nowEnabled);
+    chrome.storage.local.set({ bm_sync_enabled: nowEnabled });
+    if (statusEl) {
+      statusEl.style.color = '#9aa0a6';
+      statusEl.textContent = nowEnabled ? 'Auto-sync enabled.' : 'Bookmark sync disabled.';
+      setTimeout(() => {
+        if (statusEl.textContent.includes('sync')) statusEl.textContent = nowEnabled ? 'Auto-sync is active.' : '';
+      }, 2200);
+    }
+  });
+
+  // ── Manual Sync Now ──
+  if (syncBtn) {
+    syncBtn.addEventListener('click', () => {
+      if (statusEl) {
+        statusEl.style.color = '#9aa0a6';
+        statusEl.textContent = '⏳ Syncing…';
+      }
+      syncBtn.disabled = true;
+
+      chrome.runtime.sendMessage({ type: 'BOOKMARK_SYNC_NOW' }, resp => {
+        syncBtn.disabled = false;
+        if (chrome.runtime.lastError) {
+          if (statusEl) {
+            statusEl.style.color = '#ea4335';
+            statusEl.textContent = '✗ ' + chrome.runtime.lastError.message;
+          }
+          return;
+        }
+        if (!statusEl) return;
+        if (resp && resp.ok) {
+          if (resp.failed && resp.failed > 0) {
+            statusEl.style.color = '#fbbc04';
+            statusEl.textContent = `⚠ Synced ${resp.count} group(s), ${resp.failed} failed.`;
+          } else {
+            statusEl.style.color = '#34a853';
+            statusEl.textContent = `✓ Synced ${resp.count} group(s) to bookmarks.`;
+          }
+        } else {
+          statusEl.style.color = '#ea4335';
+          statusEl.textContent = '✗ ' + (resp && resp.error ? resp.error : 'Unknown error.');
+        }
+        setTimeout(() => {
+          statusEl.style.color = '#9aa0a6';
+          statusEl.textContent = resp && resp.ok ? 'Auto-sync is active.' : '';
+        }, 5000);
+      });
+    });
+  }
+
+  // ── Reflect changes from other tabs (same pattern as Notion UI) ──
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.bm_sync_enabled) return;
+    const enabled = !!changes.bm_sync_enabled.newValue;
+    const wasOn   = toggle.classList.contains('on');
+    toggle.className = 'toggle' + (enabled ? ' on' : '');
+    details.classList.toggle('cp-open', enabled);
+    if (statusEl && wasOn !== enabled) {
+      statusEl.style.color = '#9aa0a6';
+      statusEl.textContent = enabled ? 'Auto-sync is active.' : 'Bookmark sync disabled.';
+    }
+  });
+}
+
+initBookmarkSyncUI();

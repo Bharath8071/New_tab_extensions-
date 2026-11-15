@@ -171,24 +171,90 @@
       box-shadow: 0 2px 18px rgba(0, 0, 0, .45)
     }
 
-    /* .s-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);width:20px;height:22px;opacity:.65} */
-    .s-icon {
+    /* ── Engine picker (badge + dropdown) ── */
+    #engine-badge {
       position: absolute;
-      left: 16px;
+      left: 11px;
       top: 50%;
       transform: translateY(-50%);
-      width: 22px;
-      height: 22px;
-      opacity: 0.5;
+      width: 32px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
       z-index: 2;
     }
 
-    .s-icon path {
-      stroke: #e8eaed;
+    #engine-badge svg {
+      width: 22px;
+      height: 22px;
+      color: #e8eaed;
+      opacity: .5;
+      transition: opacity .2s;
     }
 
-    #search-wrap:hover .s-icon {
+    #engine-badge:hover svg {
       opacity: 1;
+    }
+
+    #engine-menu {
+      position: fixed;
+      width: 48px;
+      padding: 5px 0;
+      background: rgba(32, 33, 36, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+      z-index: var(--layer-autocomplete, 300);
+      visibility: hidden;
+      opacity: 0;
+      transform: translateY(-6px) scale(.92);
+      transform-origin: 50% 0;
+      pointer-events: none;
+      transition: opacity .15s ease, transform .15s cubic-bezier(.25, .8, .3, 1), visibility .15s;
+    }
+
+    #engine-menu.open {
+      visibility: visible;
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
+    }
+
+    /* enginTheme = false → extension glass theme */
+    #engine-menu.eng-glass {
+      background: rgba(32, 33, 36, 0.25);
+      backdrop-filter: blur(8px);
+    }
+
+    .eng-row {
+      height: 38px;
+      margin: 0 4px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background .1s;
+    }
+
+    .eng-row:hover {
+      background: rgba(255, 255, 255, 0.09);
+    }
+
+    .eng-row.active {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .eng-row svg {
+      width: 18px;
+      height: 18px;
+      color: #e8eaed;
+      opacity: .92;
     }
 
     .m-icon {
@@ -396,6 +462,11 @@
       text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
     }
 
+    /* Side panel: hide the names under the shortcut icons */
+    #shortcuts-grid.sc-hide-names .sc-label {
+      display: none;
+    }
+
     /* add tile */
     .sc-add-tile {
       cursor: pointer;
@@ -462,26 +533,26 @@
       flex-direction: column;
       transform: translateX(100%);
       transition: transform .25s cubic-bezier(.4, 0, .2, 1);
-      overflow-y: auto;
+      overflow: hidden;
       will-change: transform;
       --cp-text-shadow: 0 1px 2px rgba(0, 0, 0, .8), 0 0 8px rgba(0, 0, 0, .15);
       --cp-icon-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, .8)) drop-shadow(0 0 4px rgba(0, 0, 0, .15));
     }
 
-    #cust-panel::-webkit-scrollbar {
+    .cp-scroll::-webkit-scrollbar {
       width: 6px;
     }
 
-    #cust-panel::-webkit-scrollbar-track {
+    .cp-scroll::-webkit-scrollbar-track {
       background: transparent;
     }
 
-    #cust-panel::-webkit-scrollbar-thumb {
+    .cp-scroll::-webkit-scrollbar-thumb {
       background: rgba(255, 255, 255, 0.15);
       border-radius: 3px;
     }
 
-    #cust-panel::-webkit-scrollbar-thumb:hover {
+    .cp-scroll::-webkit-scrollbar-thumb:hover {
       background: rgba(255, 255, 255, 0.28);
     }
 
@@ -530,6 +601,22 @@
       padding: 16px 20px;
     }
 
+    /* Panel layout: fixed header + bottom bar, scrollable middle */
+    #cp-main-view,
+    #cp-settings-view {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .cp-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
     .cp-section::after {
       content: "";
       position: absolute;
@@ -538,6 +625,28 @@
       right: 20px;
       height: 1px;
       background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .2), transparent);
+    }
+
+    /* shortcuts-section collapses away while "Show shortcuts" is off
+       (the DOM stays — only the UI hides) */
+    .cp-section.cp-sec-collapse {
+      overflow: hidden;
+      max-height: 0;
+      padding-top: 0;
+      padding-bottom: 0;
+      margin-top: 0;
+      opacity: 0;
+      transition: max-height .18s cubic-bezier(.25, .8, .3, 1), opacity .16s ease,
+                  padding-top .18s cubic-bezier(.25, .8, .3, 1), padding-bottom .18s cubic-bezier(.25, .8, .3, 1),
+                  margin-top .18s cubic-bezier(.25, .8, .3, 1);
+    }
+
+    .cp-section.cp-sec-collapse.cp-sec-open {
+      max-height: 120px;
+      padding-top: 16px;
+      padding-bottom: 16px;
+      margin-top: 4px;
+      opacity: 1;
     }
 
     .cp-section-title {
@@ -791,6 +900,47 @@
     .cp-toggle-label {
       font-size: 13px;
       color: #e8eaed;
+    }
+
+    /* Collapsible setting row: drops open/closed under the row above */
+    .cp-row-collapse {
+      overflow: hidden;
+      max-height: 0;
+      margin-bottom: 0;
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: max-height .18s cubic-bezier(.25, .8, .3, 1), opacity .16s ease,
+                  margin-bottom .18s cubic-bezier(.25, .8, .3, 1), transform .18s cubic-bezier(.25, .8, .3, 1);
+    }
+
+    .cp-row-collapse.cp-open {
+      max-height: 40px;
+      margin-bottom: 10px;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Notion/Bookmark detail blocks: same drop effect as .cp-row-collapse */
+    .cp-details-collapse {
+      display: flex;
+      overflow: hidden;
+      max-height: 0;
+      margin-top: 0;
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: max-height .18s cubic-bezier(.25, .8, .3, 1), opacity .16s ease,
+                  margin-top .18s cubic-bezier(.25, .8, .3, 1), transform .18s cubic-bezier(.25, .8, .3, 1);
+    }
+
+    .cp-details-collapse.cp-open {
+      max-height: 280px;
+      margin-top: 12px;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    #notion-credentials.cp-open {
+      margin-top: 14px;
     }
 
     .toggle {
@@ -1465,6 +1615,8 @@
       gap: 8px;
       overflow: hidden;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+      /* Same fade/drop timing as the search dropdowns when the bar hides/shows */
+      transition: opacity .15s ease, transform .15s cubic-bezier(.25, .8, .3, 1), visibility .15s;
     }
 
     #tgm-chips-scroll {
@@ -1481,7 +1633,10 @@
     }
 
     #tgm-bar.tgm-hidden {
-      display: none !important;
+      visibility: hidden;
+      opacity: 0;
+      transform: translateY(-100%); /* tucks back up behind the top edge */
+      pointer-events: none;
     }
 
     /* ── Group chip ── */
@@ -1652,26 +1807,22 @@
       max-height: 420px;
       overflow: hidden;
       z-index: 400;
-      display: none;
+      display: flex;
       flex-direction: column;
-      animation: tgmDdIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      /* Same fade+scale dropdown effect as the search dropdowns */
+      visibility: hidden;
+      opacity: 0;
+      transform: translateY(-6px) scale(.92);
+      pointer-events: none;
+      transition: opacity .15s ease, transform .15s cubic-bezier(.25, .8, .3, 1), visibility .15s;
       transform-origin: top left;
     }
 
-    @keyframes tgmDdIn {
-      from {
-        opacity: 0;
-        transform: translateY(-6px) scale(0.97);
-      }
-
-      to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
-
     .tgm-dropdown.tgm-dd-open {
-      display: flex;
+      visibility: visible;
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
     }
 
     /* Dropdown header */
@@ -2808,10 +2959,11 @@
 
     <!-- Search -->
     <div id="search-wrap">
-      <svg class="s-icon" viewBox="0 0 24 24" fill="none">
-        <path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" stroke="#9aa0a6" stroke-width="2"
-          stroke-linecap="round" />
-      </svg>
+      <button id="engine-badge" type="button" title="Search engine" aria-label="Change search engine">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
       <input id="search-bar" type="text" placeholder="Search Google or type a URL" autocomplete="off" />
       <svg class="m-icon" viewBox="0 0 24 24" fill="none">
         <rect x="9" y="2" width="6" height="12" rx="3" fill="#9aa0a6" />
@@ -2846,15 +2998,28 @@
       <button class="cp-close" id="cp-close">✕</button>
     </div>
 
-    <!-- Settings entry -->
+    <!-- Scrollable middle (brightness, colors, wallpapers) -->
+    <div class="cp-scroll">
+    <!-- Brightness (top) -->
     <div class="cp-section">
-      <button class="cp-nav-row" id="cp-open-settings">
-        <span class="cp-nav-label">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          <span>Settings</span>
-        </span>
-        <span class="cp-nav-arrow">›</span>
-      </button>
+      <!-- Brightness slider -->
+      <div class="cp-brightness-control">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span
+            style="font-size:12px;font-weight:600;color:#e8eaed;letter-spacing:.08em;text-transform:uppercase;">Brightness</span>
+          <span id="cp-brightness-val"
+            style="font-size:12px;color:#e8eaed;font-weight:600;min-width:28px;text-align:right;">-4</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <!-- <span style="font-size:11px;">Dark</span> -->
+          <span style="font-size:11px;color:#e8eaed;">Dark</span>
+          <input id="cp-brightness" type="range" min="-10" max="10" step="1" value="-4" style="flex:1;height:4px;appearance:none;-webkit-appearance:none;
+                 background:linear-gradient(to right,#1a73e8 0%,#1a73e8 50%,rgba(255,255,255,0.15) 50%,rgba(255,255,255,0.15) 100%);
+                 border-radius:2px;outline:none;cursor:pointer;" />
+          <span style="font-size:11px;color:#e8eaed;">Bright</span>
+          <!-- <span style="font-size:11px;color:#cbced1;">Bright</span> -->
+        </div>
+      </div>
     </div>
 
     <!-- Background color -->
@@ -2875,25 +3040,19 @@
         style="margin-top:6px; border-style:solid; border-color:rgba(255,255,255,.15)">
         ✕ Remove wallpaper
       </button>
+    </div>
 
-      <!-- Brightness slider -->
-      <div class="cp-brightness-control" style="margin-top:14px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-          <span
-            style="font-size:12px;font-weight:600;color:#e8eaed;letter-spacing:.08em;text-transform:uppercase;">Brightness</span>
-          <span id="cp-brightness-val"
-            style="font-size:12px;color:#e8eaed;font-weight:600;min-width:28px;text-align:right;">-4</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <!-- <span style="font-size:11px;">Dark</span> -->
-          <span style="font-size:11px;color:#e8eaed;">Dark</span>
-          <input id="cp-brightness" type="range" min="-10" max="10" step="1" value="-4" style="flex:1;height:4px;appearance:none;-webkit-appearance:none;
-                 background:linear-gradient(to right,#1a73e8 0%,#1a73e8 50%,rgba(255,255,255,0.15) 50%,rgba(255,255,255,0.15) 100%);
-                 border-radius:2px;outline:none;cursor:pointer;" />
-          <span style="font-size:11px;color:#e8eaed;">Bright</span>
-          <!-- <span style="font-size:11px;color:#cbced1;">Bright</span> -->
-        </div>
-      </div>
+    </div><!-- /cp-scroll -->
+
+    <!-- Settings entry (bottom) -->
+    <div class="cp-section">
+      <button class="cp-nav-row" id="cp-open-settings">
+        <span class="cp-nav-label">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </span>
+        <span class="cp-nav-arrow">›</span>
+      </button>
     </div>
    </div><!-- /cp-main-view -->
 
@@ -2911,14 +3070,32 @@
       <button class="cp-close" id="cp-settings-x" title="Back to Customize">✕</button>
     </div>
 
+    <!-- Scrollable settings content -->
+    <div class="cp-scroll">
     <div class="cp-section">
       <div class="cp-toggle-row">
+        <span class="cp-toggle-label">Show search bar</span>
+        <button class="toggle on" id="toggle-search-bar" title="Toggle Search Bar"></button>
+      </div>
+      <div class="cp-toggle-row cp-row-collapse" id="cp-row-shortcuts">
+        <span class="cp-toggle-label">Show shortcuts</span>
+        <button class="toggle on" id="toggle-shortcuts"></button>
+      </div>
+      <div class="cp-toggle-row" style="margin-bottom:0">
         <span class="cp-toggle-label">Show tab groups bar</span>
         <button class="toggle on" id="toggle-tab-groups" title="Toggle Tab Groups Bar"></button>
       </div>
+    </div>
+
+    <!-- ─── Shortcuts ─── -->
+    <div class="cp-section cp-sec-collapse" id="shortcuts-section">
+      <div class="cp-toggle-row">
+        <span class="cp-toggle-label">Show names</span>
+        <button class="toggle on" id="toggle-shortcut-names" title="Show Shortcut Names"></button>
+      </div>
       <div class="cp-toggle-row" style="margin-bottom:0">
-        <span class="cp-toggle-label">Show shortcuts</span>
-        <button class="toggle on" id="toggle-shortcuts"></button>
+        <span class="cp-toggle-label">Lock shortcuts</span>
+        <button class="toggle" id="toggle-lock-shortcuts" title="Lock Shortcuts — no moving, no adding"></button>
       </div>
     </div>
 
@@ -2938,7 +3115,7 @@
       </div>
 
       <!-- Credentials (shown only when toggle is ON) -->
-      <div id="notion-credentials" style="display:none;flex-direction:column;gap:10px;margin-top:14px;">
+      <div id="notion-credentials" class="cp-details-collapse" style="flex-direction:column;gap:10px;">
         <div>
           <label for="notion-token-input" style="display:block;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;">Integration Token</label>
           <input
@@ -2976,6 +3153,36 @@
         </div>
       </div>
     </div>
+
+    <!-- ─── Bookmark Sync ─── -->
+    <div class="cp-section" id="bookmark-sync-section" style="margin-top:4px;">
+      <div class="cp-toggle-row" style="margin-bottom:0;align-items:center;">
+        <span class="cp-toggle-label" style="display:flex;align-items:center;gap:7px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="#9aa0a6" aria-hidden="true" style="flex:none;margin-top:1px;">
+            <path d="M17 3H7a2 2 0 0 0-2 2v16l7-3 7 3V5a2 2 0 0 0-2-2z"/>
+          </svg>
+          Bookmark Sync
+        </span>
+        <button class="toggle" id="toggle-bookmark-sync" title="Enable Bookmark Sync"></button>
+      </div>
+
+      <!-- Status (shown only when toggle is ON) -->
+      <div id="bookmark-sync-details" class="cp-details-collapse" style="flex-direction:column;gap:8px;">
+        <p style="font-size:11px;color:#9aa0a6;margin:0;line-height:1.5;">
+          Tab groups are mirrored as folders under <strong style="color:#bdc1c6;">Bookmarks Bar › Tab Groups</strong>. Adding or removing tabs keeps both sides in sync automatically.
+        </p>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <span id="bookmark-sync-status" style="font-size:12px;color:#9aa0a6;line-height:1.4;"></span>
+          <button id="bookmark-sync-now-btn"
+            style="flex:none;padding:7px 15px;border-radius:8px;border:none;
+                   background:#34a853;color:#fff;font-size:12px;font-weight:600;cursor:pointer;
+                   transition:background .2s;white-space:nowrap;">
+            Sync Now
+          </button>
+        </div>
+      </div>
+    </div>
+    </div><!-- /cp-scroll -->
    </div><!-- /cp-settings-view -->
   </div>
 

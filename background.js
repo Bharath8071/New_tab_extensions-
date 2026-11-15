@@ -615,6 +615,507 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// BOOKMARK SYNC — background.js
+// Two-way mirror: extension tab groups ↔ Chrome Bookmarks
+//
+// Layout in Chrome Bookmarks:
+//   Bookmarks Bar
+//   └── Tab Groups            ← parent folder (auto-created)
+//       ├── Work              ← one subfolder per tab group
+//       │   ├── GitHub
+//       │   └── Jira
+//       └── Research
+//           └── MDN
+//
+// Source-of-truth rules:
+//   • Tabs added to a group  → bookmark created inside that folder
+//   • Tabs removed from a group → bookmark deleted
+//   • Group renamed/deleted  → folder renamed/deleted
+//   • Bookmark added to folder externally → tab added to group (merge)
+//   • Group folder deleted externally    → folder auto-recreated on next sync
+// ═══════════════════════════════════════════════════════
+
+const BM_PARENT_TITLE  = 'Tab Groups';   // name of the root folder we manage
+const BM_MAP_KEY       = 'bm_sync_map';  // storage key: { parentId, groups: { [groupId]: folderId } }
+
+// Find the Bookmarks Bar node id (Chrome's built-in id is '1')
+const BM_BAR_ID = '1';
+
+// ── Helpers ──────────────────────────────────────────────
+
+async function _bmGetOrCreateParent() {
+  // Look for an existing "Tab Groups" folder directly under the Bookmarks Bar
+  const children = await chrome.bookmarks.getChildren(BM_BAR_ID).catch(() => []);
+  const existing = children.find(n => n.title === BM_PARENT_TITLE && !n.url);
+  if (existing) return existing.id;
+
+  // Create it
+  const created = await chrome.bookmarks.create({ parentId: BM_BAR_ID, title: BM_PARENT_TITLE });
+  return created.id;
+}
+
+async function _bmGetFolderChildren(folderId) {
+  try {
+    return await chrome.bookmarks.getChildren(folderId);
+  } catch (_) { return null; } // null = folder doesn't exist
+}
+
+async function _bmFolderExists(folderId) {
+  if (!folderId) return false;
+  try {
+    const results = await chrome.bookmarks.get(folderId);
+    return !!(results && results[0] && !results[0].url);
+  } catch (_) { return false; }
+}
+
+function _bmValidUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return /^https?:\/\/.+/.test(url.trim());
+}
+
+// ── Read stored map ────────────────────────────────────────────
+
+async function _bmReadMap() {
+  const r = await chrome.storage.local.get([BM_MAP_KEY]).catch(() => ({}));
+  const raw = r[BM_MAP_KEY];
+  if (!raw || typeof raw !== 'object') return { parentId: null, groups: {} };
+  return {
+    parentId: raw.parentId || null,
+    groups:   (raw.groups && typeof raw.groups === 'object') ? raw.groups : {},
+  };
+}
+
+async function _bmSaveMap(map) {
+  await chrome.storage.local.set({ [BM_MAP_KEY]: map }).catch(() => {});
+}
+
+// ── Main sync function ─────────────────────────────────────────
+
+async function bookmarkSyncAllGroups(options = {}) {
+  const r = await chrome.storage.local.get(['bm_sync_enabled', 'ntp_state']).catch(() => ({}));
+  if (!r.bm_sync_enabled && !options.force) return { ok: true, count: 0, skipped: true };
+
+  const groups = (r.ntp_state && Array.isArray(r.ntp_state.tabGroups))
+    ? r.ntp_state.tabGroups.filter(g => g.type !== 'note') // skip note groups
+    : [];
+
+  const map = await _bmReadMap();
+  let mapDirty = false;
+
+  // Ensure parent folder exists
+  let parentId = map.parentId;
+  const parentOk = parentId ? await _bmFolderExists(parentId) : false;
+  if (!parentOk) {
+    parentId = await _bmGetOrCreateParent();
+    map.parentId = parentId;
+    mapDirty = true;
+  }
+
+  const parentChildren = await chrome.bookmarks.getChildren(parentId).catch(() => []);
+
+  let synced = 0;
+  let failed = 0;
+  let firstError = null;
+  const syncedGroupIds = new Set();
+
+  for (const group of groups) {
+    syncedGroupIds.add(group.id);
+    const tabs = Array.isArray(group.tabs) ? group.tabs.filter(t => _bmValidUrl(t && t.url)) : [];
+    const subGroups = Array.isArray(group.subGroups) ? group.subGroups : [];
+
+    let folderId = map.groups[group.id] || null;
+
+    try {
+      // ── Step 1: Ensure group folder exists ──
+      const folderExists = folderId ? await _bmFolderExists(folderId) : false;
+      if (!folderExists) {
+        const sibling = parentChildren.find(n => !n.url && n.title === (group.name || 'Unnamed') && n.id !== folderId);
+        if (sibling && !Object.values(map.groups).includes(sibling.id)) {
+          folderId = sibling.id;
+        } else {
+          const folder = await chrome.bookmarks.create({ parentId, title: group.name || 'Unnamed' });
+          folderId = folder.id;
+        }
+        map.groups[group.id] = folderId;
+        mapDirty = true;
+      } else {
+        const folderNode = (await chrome.bookmarks.get(folderId).catch(() => []))[0];
+        if (folderNode && folderNode.title !== (group.name || 'Unnamed')) {
+          await chrome.bookmarks.update(folderId, { title: group.name || 'Unnamed' }).catch(() => {});
+        }
+      }
+
+      // ── Step 2: Read folder children (bookmarks + sub-folders) ──
+      const folderChildren = await _bmGetFolderChildren(folderId);
+      if (folderChildren === null) {
+        delete map.groups[group.id];
+        mapDirty = true;
+        continue;
+      }
+
+      const bmByUrl  = new Map(); // url → bookmark node (direct children only)
+      const bmFolders = [];       // sub-folder nodes
+      for (const child of folderChildren) {
+        if (child.url) bmByUrl.set(child.url, child);
+        else bmFolders.push(child);
+      }
+
+      const tabUrls = new Set(tabs.map(t => t.url));
+
+      // ── Step 3: Sync direct-child bookmarks (group.tabs) ──
+      for (const tab of tabs) {
+        if (!bmByUrl.has(tab.url)) {
+          await chrome.bookmarks.create({
+            parentId: folderId, title: tab.title || tab.url, url: tab.url,
+          }).catch(err => { console.warn('[TGM BM] Could not create bookmark:', tab.url, err); });
+        } else {
+          const existing = bmByUrl.get(tab.url);
+          if (existing && existing.title !== (tab.title || tab.url)) {
+            await chrome.bookmarks.update(existing.id, { title: tab.title || tab.url }).catch(() => {});
+          }
+        }
+      }
+
+      // Merge: bookmarks in folder but not in group → adopt into group.tabs
+      const newTabs = [];
+      for (const [url, bm] of bmByUrl) {
+        if (!tabUrls.has(url)) newTabs.push({ title: bm.title || url, url });
+      }
+      if (newTabs.length > 0) {
+        await updateState(st => {
+          const g = (st.tabGroups || []).find(x => x.id === group.id);
+          if (!g) return false;
+          g.tabs = g.tabs || [];
+          let changed = false;
+          for (const nt of newTabs) {
+            if (!g.tabs.some(t => t.url === nt.url)) { g.tabs.push(nt); changed = true; }
+          }
+          return changed;
+        });
+      }
+
+      // Delete bookmarks for tabs removed from the group
+      for (const [url, bm] of bmByUrl) {
+        if (!tabUrls.has(url) && !newTabs.some(t => t.url === url)) {
+          await chrome.bookmarks.remove(bm.id).catch(() => {});
+        }
+      }
+
+      // ── Step 4: Sync sub-groups ↔ sub-folders ──
+      // Build maps: subId→subFolderId (stored) and subFolderTitle→node (live)
+      map.subGroups = map.subGroups || {};
+      map.subGroups[group.id] = map.subGroups[group.id] || {};
+      const subMap = map.subGroups[group.id]; // { [subId]: folderId }
+
+      const bmFolderByTitle = new Map();
+      for (const f of bmFolders) {
+        if (!bmFolderByTitle.has(f.title)) bmFolderByTitle.set(f.title, []);
+        bmFolderByTitle.get(f.title).push(f);
+      }
+
+      // Track which sub-folder IDs we manage (to detect new external sub-folders)
+      const managedSubFolderIds = new Set(Object.values(subMap));
+
+      // 4a: Sync each extension sub-group to its bookmark sub-folder
+      const syncedSubIds = new Set();
+      for (const sub of subGroups) {
+        syncedSubIds.add(sub.id);
+        const subTabs = Array.isArray(sub.tabs) ? sub.tabs.filter(t => _bmValidUrl(t && t.url)) : [];
+        let subFolderId = subMap[sub.id] || null;
+
+        const subFolderExists = subFolderId ? await _bmFolderExists(subFolderId) : false;
+        if (!subFolderExists) {
+          // Try to adopt an existing sub-folder with the same name
+          const candidates = bmFolderByTitle.get(sub.name || 'Unnamed') || [];
+          const adoptable = candidates.find(f => !managedSubFolderIds.has(f.id));
+          if (adoptable) {
+            subFolderId = adoptable.id;
+          } else {
+            const sf = await chrome.bookmarks.create({ parentId: folderId, title: sub.name || 'Unnamed' });
+            subFolderId = sf.id;
+          }
+          subMap[sub.id] = subFolderId;
+          managedSubFolderIds.add(subFolderId);
+          mapDirty = true;
+        } else {
+          // Rename sub-folder if sub-group was renamed
+          const sfNode = (await chrome.bookmarks.get(subFolderId).catch(() => []))[0];
+          if (sfNode && sfNode.title !== (sub.name || 'Unnamed')) {
+            await chrome.bookmarks.update(subFolderId, { title: sub.name || 'Unnamed' }).catch(() => {});
+          }
+        }
+
+        // Sync sub-folder bookmarks ↔ sub-group tabs
+        const sfChildren = await _bmGetFolderChildren(subFolderId);
+        if (!sfChildren) { delete subMap[sub.id]; mapDirty = true; continue; }
+
+        const sfByUrl = new Map();
+        for (const c of sfChildren) { if (c.url) sfByUrl.set(c.url, c); }
+        const subTabUrls = new Set(subTabs.map(t => t.url));
+
+        // Add missing bookmarks
+        for (const tab of subTabs) {
+          if (!sfByUrl.has(tab.url)) {
+            await chrome.bookmarks.create({
+              parentId: subFolderId, title: tab.title || tab.url, url: tab.url,
+            }).catch(() => {});
+          } else {
+            const ex = sfByUrl.get(tab.url);
+            if (ex && ex.title !== (tab.title || tab.url)) {
+              await chrome.bookmarks.update(ex.id, { title: tab.title || tab.url }).catch(() => {});
+            }
+          }
+        }
+
+        // Adopt external bookmarks into sub-group
+        const newSubTabs = [];
+        for (const [url, bm] of sfByUrl) {
+          if (!subTabUrls.has(url)) newSubTabs.push({ title: bm.title || url, url });
+        }
+        if (newSubTabs.length > 0) {
+          await updateState(st => {
+            const g = (st.tabGroups || []).find(x => x.id === group.id);
+            if (!g) return false;
+            g.subGroups = g.subGroups || [];
+            const s = g.subGroups.find(x => x.id === sub.id);
+            if (!s) return false;
+            s.tabs = s.tabs || [];
+            let changed = false;
+            for (const nt of newSubTabs) {
+              if (!s.tabs.some(t => t.url === nt.url)) { s.tabs.push(nt); changed = true; }
+            }
+            return changed;
+          });
+        }
+
+        // Delete bookmarks for sub-tabs that were removed
+        for (const [url, bm] of sfByUrl) {
+          if (!subTabUrls.has(url) && !newSubTabs.some(t => t.url === url)) {
+            await chrome.bookmarks.remove(bm.id).catch(() => {});
+          }
+        }
+      }
+
+      // 4b: Delete sub-folders for removed sub-groups
+      for (const [subId, subFolderId] of Object.entries(subMap)) {
+        if (!syncedSubIds.has(subId)) {
+          await chrome.bookmarks.removeTree(subFolderId).catch(() => {});
+          delete subMap[subId];
+          mapDirty = true;
+        }
+      }
+
+      // 4c: Import external sub-folders (created directly in Chrome) as new sub-groups
+      for (const f of bmFolders) {
+        if (!managedSubFolderIds.has(f.id)) {
+          // External sub-folder not tracked yet → create a sub-group for it
+          const sfChildren = await _bmGetFolderChildren(f.id) || [];
+          const newSubTabs = sfChildren
+            .filter(c => c.url && _bmValidUrl(c.url))
+            .map(c => ({ title: c.title || c.url, url: c.url }));
+
+          await updateState(st => {
+            const g = (st.tabGroups || []).find(x => x.id === group.id);
+            if (!g) return false;
+            g.subGroups = g.subGroups || [];
+            // Don't duplicate by name
+            if (g.subGroups.some(s => s.name === f.title)) return false;
+            const newSub = { id: 'sg_' + Date.now() + '_' + f.id.slice(-4), name: f.title, tabs: newSubTabs };
+            g.subGroups.push(newSub);
+            // Register in map
+            subMap[newSub.id] = f.id;
+            mapDirty = true;
+            return true;
+          });
+        }
+      }
+
+      synced++;
+    } catch (err) {
+      failed++;
+      if (!firstError) firstError = String((err && err.message) || err);
+      console.warn('[TGM BM] sync error for group:', group.name, err);
+    }
+  }
+
+  // ── Step 5: Delete folders for groups that were removed ──
+  for (const [groupId, folderId] of Object.entries(map.groups)) {
+    if (!syncedGroupIds.has(groupId)) {
+      await chrome.bookmarks.removeTree(folderId).catch(() => {});
+      delete map.groups[groupId];
+      if (map.subGroups) delete map.subGroups[groupId];
+      mapDirty = true;
+    }
+  }
+
+  if (mapDirty) await _bmSaveMap(map);
+
+  return { ok: true, count: synced, failed, firstError: failed > 0 ? firstError : null };
+}
+
+// ── Change signature: only run sync when group data actually changes ──
+function _bmGroupSig(groups) {
+  try {
+    return JSON.stringify(
+      (groups || [])
+        .filter(g => g.type !== 'note')
+        .map(g => ({
+          id:        g.id,
+          name:      (g.name || ''),
+          tabs:      (Array.isArray(g.tabs) ? g.tabs : [])
+                       .filter(t => _bmValidUrl(t && t.url))
+                       .map(t => [t.url, t.title || '']),
+          subGroups: (Array.isArray(g.subGroups) ? g.subGroups : [])
+                       .map(s => ({
+                         id:   s.id,
+                         name: s.name || '',
+                         tabs: (Array.isArray(s.tabs) ? s.tabs : [])
+                                 .filter(t => _bmValidUrl(t && t.url))
+                                 .map(t => [t.url, t.title || '']),
+                       })),
+        }))
+    );
+  } catch (_) { return ''; }
+}
+
+function _bmGroupsChanged(ov, nv) {
+  return _bmGroupSig(ov && ov.tabGroups) !== _bmGroupSig(nv && nv.tabGroups);
+}
+
+// ── Debounce / serialise ──────────────────────────────────────────
+
+let _bmSyncChain    = Promise.resolve();
+let _bmDebounceTimer = null;
+
+function _runBookmarkSync(options) {
+  const run = _bmSyncChain.catch(() => {}).then(() => bookmarkSyncAllGroups(options));
+  _bmSyncChain = run.catch(() => {});
+  return run;
+}
+
+function _scheduleBookmarkSync() {
+  clearTimeout(_bmDebounceTimer);
+  _bmDebounceTimer = setTimeout(() => {
+    _runBookmarkSync()
+      .then(r => {
+        if (r && !r.ok && !r.skipped) console.warn('[TGM BM] Auto-sync failed:', r.firstError || r);
+        else if (r && r.ok && !r.skipped && r.count > 0) {
+          console.log(`[TGM BM] Auto-sync: ${r.count} group(s) synced.`);
+        }
+      })
+      .catch(err => console.warn('[TGM BM] Auto-sync error:', err));
+  }, 2000);
+}
+
+// ── Listen for ntp_state changes (group tabs changed) ─────────────
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  const justEnabled = !!(changes.bm_sync_enabled && changes.bm_sync_enabled.newValue === true);
+  if (justEnabled) { _scheduleBookmarkSync(); return; }
+  if (!changes.ntp_state) return;
+  chrome.storage.local.get(['bm_sync_enabled']).then(r => {
+    if (!r.bm_sync_enabled) return;
+    if (_bmGroupsChanged(changes.ntp_state.oldValue, changes.ntp_state.newValue)) {
+      _scheduleBookmarkSync();
+    }
+  }).catch(() => {});
+});
+
+// ── Listen for bookmark changes (two-way: bookmarks → groups) ─────
+// Fires when user manually adds/removes a bookmark in Chrome
+chrome.bookmarks.onCreated.addListener((id, bookmark) => {
+  if (!bookmark.url) return; // folder created, not a bookmark
+  chrome.storage.local.get(['bm_sync_enabled', BM_MAP_KEY]).then(r => {
+    if (!r.bm_sync_enabled) return;
+    const map = r[BM_MAP_KEY];
+    if (!map || !map.groups) return;
+    // Check if this bookmark's parent is one of our group folders
+    const groupId = Object.keys(map.groups).find(gid => map.groups[gid] === bookmark.parentId);
+    if (!groupId) return;
+    if (!_bmValidUrl(bookmark.url)) return;
+    // Merge the new bookmark into the group's tab list
+    updateState(st => {
+      const g = (st.tabGroups || []).find(x => x.id === groupId);
+      if (!g) return false;
+      g.tabs = g.tabs || [];
+      if (g.tabs.some(t => t.url === bookmark.url)) return false;
+      g.tabs.push({ title: bookmark.title || bookmark.url, url: bookmark.url });
+      return true;
+    }).catch(() => {});
+  }).catch(() => {});
+});
+
+chrome.bookmarks.onRemoved.addListener((id, removeInfo) => {
+  chrome.storage.local.get(['bm_sync_enabled', BM_MAP_KEY]).then(r => {
+    if (!r.bm_sync_enabled) return;
+    const map = r[BM_MAP_KEY];
+    if (!map || !map.groups) return;
+
+    // Was the removed item one of our managed group folders?
+    const groupId = Object.keys(map.groups).find(gid => map.groups[gid] === id);
+    if (groupId) {
+      // Folder deleted externally → schedule a sync which will recreate it
+      _scheduleBookmarkSync();
+      return;
+    }
+
+    // Was it a bookmark inside one of our folders?
+    const parentGroupId = Object.keys(map.groups).find(gid => map.groups[gid] === removeInfo.parentId);
+    if (!parentGroupId) return;
+
+    // Remove matching tab from the group
+    if (removeInfo.node && removeInfo.node.url) {
+      const url = removeInfo.node.url;
+      updateState(st => {
+        const g = (st.tabGroups || []).find(x => x.id === parentGroupId);
+        if (!g || !Array.isArray(g.tabs)) return false;
+        const before = g.tabs.length;
+        g.tabs = g.tabs.filter(t => t.url !== url);
+        return g.tabs.length !== before;
+      }).catch(() => {});
+    }
+  }).catch(() => {});
+});
+
+chrome.bookmarks.onChanged.addListener((id, changeInfo) => {
+  // Title update: sync title change back to the group tab entry
+  if (!changeInfo.url && !changeInfo.title) return;
+  chrome.storage.local.get(['bm_sync_enabled', BM_MAP_KEY]).then(r => {
+    if (!r.bm_sync_enabled) return;
+    const map = r[BM_MAP_KEY];
+    if (!map || !map.groups) return;
+    // Need to find parent of the changed bookmark
+    chrome.bookmarks.get(id).then(nodes => {
+      const bm = nodes && nodes[0];
+      if (!bm || !bm.url || !bm.parentId) return;
+      const parentGroupId = Object.keys(map.groups).find(gid => map.groups[gid] === bm.parentId);
+      if (!parentGroupId) return;
+      if (!_bmValidUrl(bm.url)) return;
+      updateState(st => {
+        const g = (st.tabGroups || []).find(x => x.id === parentGroupId);
+        if (!g || !Array.isArray(g.tabs)) return false;
+        const t = g.tabs.find(x => x.url === bm.url);
+        if (!t) return false;
+        const newTitle = bm.title || bm.url;
+        if (t.title === newTitle) return false;
+        t.title = newTitle;
+        return true;
+      }).catch(() => {});
+    }).catch(() => {});
+  }).catch(() => {});
+});
+
+// ── Manual "Sync Now" message from newtab.js ─────────────────────
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === 'BOOKMARK_SYNC_NOW') {
+    _runBookmarkSync({ force: true })
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+});
+
+// ═══════════════════════════════════════════════════════
 // NOTION SYNC — background.js
 // Mirror tab groups into a Notion database (upsert, push-only)
 // ═══════════════════════════════════════════════════════
@@ -633,21 +1134,53 @@ function _notionHeaders(token) {
   };
 }
 
-// Notion allows ~3 requests/second. Updating a page deletes one block per old
-// tab, so a burst can hit 429; retry those using Retry-After when provided.
-// (5xx is not retried: a create/append that actually succeeded would duplicate
-// a row or bullets on the retry.)
-async function _notionFetch(url, opts, retries = 2) {
+// Notion allows ~3 requests/second average per integration token.
+// Enforce minimum ~350ms between requests to stay safely below rate limits.
+let _notionLastRequestTime = 0;
+const NOTION_MIN_INTERVAL_MS = 350;
+
+async function _notionFetch(url, opts, retries = 4) {
   for (let attempt = 0; ; attempt++) {
-    const resp = await fetch(url, opts);
+    const now = Date.now();
+    const elapsed = now - _notionLastRequestTime;
+    if (elapsed < NOTION_MIN_INTERVAL_MS) {
+      await new Promise(r => setTimeout(r, NOTION_MIN_INTERVAL_MS - elapsed));
+    }
+    _notionLastRequestTime = Date.now();
+
+    let resp;
+    try {
+      resp = await fetch(url, opts);
+    } catch (netErr) {
+      if (attempt < retries) {
+        const wait = 1000 * Math.pow(2, attempt);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw netErr;
+    }
+
     if (resp.ok) return resp;
+
+    // 429 Too Many Requests: use Retry-After or exponential backoff with jitter
     if (resp.status === 429 && attempt < retries) {
-      const after = parseFloat(resp.headers && resp.headers.get('Retry-After'));
-      // Cap the wait: an hour-long Retry-After must not hang the sync chain.
-      const wait  = Number.isFinite(after) ? Math.min(after * 1000, 10000) : 1000 * (attempt + 1);
+      const headerVal = resp.headers && resp.headers.get('Retry-After');
+      const after = headerVal ? parseFloat(headerVal) : NaN;
+      const wait = Number.isFinite(after)
+        ? Math.min(Math.max(after * 1000, 1500), 15000)
+        : Math.min(1500 * Math.pow(2, attempt) + Math.random() * 500, 15000);
+      console.warn(`[TGM Notion] Rate limited (429). Retrying in ${Math.round(wait)}ms (attempt ${attempt + 1}/${retries})...`);
       await new Promise(r => setTimeout(r, wait));
       continue;
     }
+
+    // 502/503/504 transient Notion gateway errors
+    if ((resp.status === 502 || resp.status === 503 || resp.status === 504) && attempt < retries) {
+      const wait = 1500 * Math.pow(2, attempt);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+
     let body = '';
     try { body = await resp.text(); } catch (_) {}
     const err = new Error(`Notion ${(opts && opts.method) || 'GET'} failed (${resp.status}): ${body}`);
@@ -677,9 +1210,9 @@ async function _notionQueryDb(token, dbId) {
 
 function _notionProperties(group, tabCount, titleProp = 'Name') {
   return {
-    [titleProp]:   { title:     [{ text: { content: (group.name || 'Unnamed').slice(0, 2000) } }] },
-    'Color': { rich_text: [{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
-    'Tabs':  { number:    tabCount },
+    [titleProp]: { title:     [{ text: { content: (group.name || 'Unnamed').slice(0, 2000) } }] },
+    'Color':     { rich_text: [{ text: { content: (group.color || '#607d8b').slice(0, 100) } }] },
+    'Tabs':      { number:    tabCount },
   };
 }
 
@@ -688,16 +1221,10 @@ function _notionProperties(group, tabCount, titleProp = 'Name') {
 // and the actual title-property name is resolved from the schema (Notion lets
 // users rename it, so it isn't always "Name").
 async function _notionEnsureSchema(token, dbId) {
-  const resp = await fetch(`${NOTION_API}/databases/${dbId}`, {
+  const resp = await _notionFetch(`${NOTION_API}/databases/${dbId}`, {
     method:  'GET',
     headers: _notionHeaders(token),
   });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    const err = new Error(`Notion GET failed (${resp.status}): ${body}`);
-    err.status = resp.status;
-    throw err;
-  }
   const db = await resp.json();
   const props = (db && db.properties) || {};
 
@@ -706,17 +1233,11 @@ async function _notionEnsureSchema(token, dbId) {
   if (!props.Tabs)  missing.Tabs  = { number:    {} };
 
   if (Object.keys(missing).length) {
-    const patchResp = await fetch(`${NOTION_API}/databases/${dbId}`, {
+    await _notionFetch(`${NOTION_API}/databases/${dbId}`, {
       method:  'PATCH',
       headers: _notionHeaders(token),
       body:    JSON.stringify({ properties: missing }),
     });
-    if (!patchResp.ok) {
-      const body = await patchResp.text().catch(() => '');
-      const err = new Error(`Notion PATCH database failed (${patchResp.status}): ${body}`);
-      err.status = patchResp.status;
-      throw err;
-    }
   }
 
   // Resolve the title property (title type), falling back to "Name".
@@ -726,14 +1247,104 @@ async function _notionEnsureSchema(token, dbId) {
   return 'Name';
 }
 
-async function _notionCreatePage(token, dbId, group, tabCount, titleProp) {
+function _notionValidUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (/^https?:\/\/.+/i.test(trimmed)) {
+    return trimmed.slice(0, 2000);
+  }
+  return null;
+}
+
+// Generate Notion blocks for both Tab Groups and Note Groups
+function _notionBuildGroupBlocks(group) {
+  if (!group) return [];
+
+  // Note groups: checklist or text
+  if (group.type === 'note') {
+    if (group.noteMode === 'text' || (!group.checklist && group.textContent)) {
+      const text = (group.textContent || '').trim();
+      if (!text) return [];
+      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      return lines.map(line => ({
+        object: 'block',
+        type:   'paragraph',
+        paragraph: {
+          rich_text: [{
+            type: 'text',
+            text: { content: line.slice(0, 2000) },
+          }],
+        },
+      }));
+    }
+
+    const items = Array.isArray(group.checklist) ? group.checklist : [];
+    return items.map(item => ({
+      object: 'block',
+      type:   'to_do',
+      to_do: {
+        rich_text: [{
+          type: 'text',
+          text: { content: ((item && item.text) || 'Untitled item').slice(0, 2000) },
+        }],
+        checked: !!(item && item.done),
+      },
+    }));
+  }
+
+  // Standard tab group: bulleted list of tabs
+  const tabs = Array.isArray(group.tabs) ? group.tabs : [];
+  return tabs.map(t => {
+    const validUrl = _notionValidUrl(t && t.url);
+    const displayTitle = ((t && (t.title || t.url)) || 'Untitled') + ' — ';
+    const displayUrl = (t && t.url) || '';
+    return {
+      object: 'block',
+      type:   'bulleted_list_item',
+      bulleted_list_item: {
+        rich_text: [
+          {
+            type: 'text',
+            text: {
+              content: displayTitle.slice(0, 400),
+            },
+          },
+          {
+            type: 'text',
+            text: {
+              content: displayUrl.slice(0, 2000),
+              link:    validUrl ? { url: validUrl } : undefined,
+            },
+          },
+        ],
+      },
+    };
+  });
+}
+
+function _notionGroupCount(group) {
+  if (!group) return 0;
+  if (group.type === 'note') {
+    if (Array.isArray(group.checklist) && group.checklist.length > 0) {
+      return group.checklist.length;
+    }
+    return (group.textContent && group.textContent.trim()) ? 1 : 0;
+  }
+  return Array.isArray(group.tabs) ? group.tabs.length : 0;
+}
+
+async function _notionCreatePage(token, dbId, group, tabCount, titleProp, initialBlocks = []) {
+  const body = {
+    parent:     { database_id: dbId },
+    properties: _notionProperties(group, tabCount, titleProp),
+  };
+  if (Array.isArray(initialBlocks) && initialBlocks.length > 0) {
+    body.children = initialBlocks;
+  }
   const resp = await _notionFetch(`${NOTION_API}/pages`, {
     method:  'POST',
     headers: _notionHeaders(token),
-    body:    JSON.stringify({
-      parent:     { database_id: dbId },
-      properties: _notionProperties(group, tabCount, titleProp),
-    }),
+    body:    JSON.stringify(body),
   });
   return resp.json();
 }
@@ -742,43 +1353,21 @@ async function _notionUpdatePage(token, pageId, group, tabCount, titleProp) {
   const resp = await _notionFetch(`${NOTION_API}/pages/${pageId}`, {
     method:  'PATCH',
     headers: _notionHeaders(token),
-    body:    JSON.stringify({ properties: _notionProperties(group, tabCount, titleProp) }),
+    body:    JSON.stringify({
+      archived:   false,
+      properties: _notionProperties(group, tabCount, titleProp),
+    }),
   });
   return resp.json();
 }
 
-// Append saved tabs as bullet blocks to a Notion page body
-async function _notionAppendTabs(token, pageId, tabs) {
-  if (!tabs || tabs.length === 0) return;
-
-  const children = tabs.map(t => ({
-    object: 'block',
-    type:   'bulleted_list_item',
-    bulleted_list_item: {
-      rich_text: [
-        {
-          type: 'text',
-          text: {
-            content: ((t.title || t.url || 'Untitled') + ' — ').slice(0, 400),
-          },
-        },
-        {
-          type: 'text',
-          text: {
-            content: (t.url || '').slice(0, 2000),
-            link:    t.url ? { url: t.url.slice(0, 2000) } : undefined,
-          },
-        },
-      ],
-    },
-  }));
-
-  // Notion limits: 100 blocks per PATCH request
-  for (let i = 0; i < children.length; i += 100) {
+async function _notionAppendBlocks(token, pageId, blocks) {
+  if (!blocks || blocks.length === 0) return;
+  for (let i = 0; i < blocks.length; i += 100) {
     await _notionFetch(`${NOTION_API}/blocks/${pageId}/children`, {
       method:  'PATCH',
       headers: _notionHeaders(token),
-      body:    JSON.stringify({ children: children.slice(i, i + 100) }),
+      body:    JSON.stringify({ children: blocks.slice(i, i + 100) }),
     });
   }
 }
@@ -805,31 +1394,88 @@ function _notionBlockText(block) {
   return rich.map(x => (x && (x.plain_text || (x.text && x.text.content))) || '').join('');
 }
 
-// Make the page body match the group's current tabs. Only bulleted-list blocks
-// (the ones this integration writes) are replaced; other page content is kept.
-async function _notionReplaceTabs(token, pageId, tabs) {
-  const wanted   = (tabs || []).map(t => (t.title || t.url || 'Untitled') + ' — ' + (t.url || ''));
-  const children = await _notionGetChildren(token, pageId);
-  const ours     = children.filter(b => b && b.type === 'bulleted_list_item');
-  const current  = ours.map(_notionBlockText);
-  if (current.length === wanted.length && current.every((text, i) => text === wanted[i])) return;
-
-  for (const block of ours) {
-    // A failed delete would let the append duplicate bullets, so stop here and
-    // leave the old body for the next sync to retry.
-    await _notionFetch(`${NOTION_API}/blocks/${block.id}`, {
-      method:  'DELETE',
-      headers: _notionHeaders(token),
-    });
+function _notionBlockSig(b) {
+  if (!b) return '';
+  const type = b.type;
+  if (!type) return '';
+  if (type === 'bulleted_list_item') {
+    return 'bullet:' + _notionBlockText(b);
   }
-  await _notionAppendTabs(token, pageId, tabs);
+  if (type === 'to_do') {
+    const checked = !!(b.to_do && b.to_do.checked);
+    return `todo:${checked}:${_notionBlockText(b)}`;
+  }
+  if (type === 'paragraph') {
+    return 'p:' + _notionBlockText(b);
+  }
+  return type + ':' + _notionBlockText(b);
 }
 
-function _notionPageTitle(page) {
+function _notionNewBlockSig(b) {
+  if (!b) return '';
+  const type = b.type;
+  if (!type || !b[type]) return '';
+  const rich = b[type].rich_text;
+  const text = Array.isArray(rich)
+    ? rich.map(x => (x && x.text && x.text.content) || '').join('')
+    : '';
+  if (type === 'bulleted_list_item') return 'bullet:' + text;
+  if (type === 'to_do') return `todo:${!!(b.to_do && b.to_do.checked)}:${text}`;
+  if (type === 'paragraph') return 'p:' + text;
+  return type + ':' + text;
+}
+
+// Make the page body match the group's current blocks.
+// Only our generated blocks (bulleted_list_item, to_do, paragraph) are replaced;
+// other custom page blocks added by the user are kept.
+async function _notionReplaceContent(token, pageId, blocks) {
+  const children = await _notionGetChildren(token, pageId);
+  const ours = children.filter(b => b && (
+    b.type === 'bulleted_list_item' || b.type === 'to_do' || b.type === 'paragraph'
+  ));
+
+  const current = ours.map(_notionBlockSig);
+  const wanted  = (blocks || []).map(_notionNewBlockSig);
+
+  // If page content already matches, return immediately (zero API calls)
+  if (current.length === wanted.length && current.every((sig, i) => sig === wanted[i])) {
+    return;
+  }
+
+  for (const block of ours) {
+    if (block && block.id) {
+      await _notionFetch(`${NOTION_API}/blocks/${block.id}`, {
+        method:  'DELETE',
+        headers: _notionHeaders(token),
+      });
+    }
+  }
+  await _notionAppendBlocks(token, pageId, blocks);
+}
+
+// Extract page title dynamically regardless of property name
+function _notionPageTitle(page, titleProp) {
   try {
-    return (page.properties.Name.title || [])
-      .map(t => (t && (t.plain_text || (t.text && t.text.content))) || '')
-      .join('').trim();
+    if (!page || !page.properties) return '';
+    if (titleProp && page.properties[titleProp] && page.properties[titleProp].title) {
+      return (page.properties[titleProp].title || [])
+        .map(t => (t && (t.plain_text || (t.text && t.text.content))) || '')
+        .join('').trim();
+    }
+    for (const key of Object.keys(page.properties)) {
+      const p = page.properties[key];
+      if (p && p.type === 'title' && Array.isArray(p.title)) {
+        return p.title
+          .map(t => (t && (t.plain_text || (t.text && t.text.content))) || '')
+          .join('').trim();
+      }
+    }
+    if (page.properties.Name && Array.isArray(page.properties.Name.title)) {
+      return page.properties.Name.title
+        .map(t => (t && (t.plain_text || (t.text && t.text.content))) || '')
+        .join('').trim();
+    }
+    return '';
   } catch (_) { return ''; }
 }
 
@@ -878,7 +1524,7 @@ async function notionSyncAllGroups() {
     if (Object.keys(map).length) {
       await chrome.storage.local.set({ [NOTION_MAP_KEY]: { v: 1, dbId, pages: {} } }).catch(() => {});
     }
-    return { ok: true, count: 0 };
+    return { ok: true, count: 0, failed: 0 };
   }
 
   // First run (or a group added after the map was built): adopt pages created
@@ -893,7 +1539,8 @@ async function notionSyncAllGroups() {
     const used = new Set(Object.keys(map).map(id => map[id]));
     const byName = new Map();
     for (const page of existing) {
-      const title = _notionPageTitle(page).toLowerCase();
+      if (page.archived) continue;
+      const title = _notionPageTitle(page, titleProp).toLowerCase();
       if (!title) continue;
       if (!byName.has(title)) byName.set(title, []);
       byName.get(title).push(page);
@@ -911,35 +1558,49 @@ async function notionSyncAllGroups() {
   }
 
   let synced = 0;
+  let failed = 0;
   let firstError = null;
+
   for (const group of groups) {
-    const tabs = Array.isArray(group.tabs) ? group.tabs : [];
+    const count = _notionGroupCount(group);
+    const blocks = _notionBuildGroupBlocks(group);
     let pageId = map[group.id] || null;
     let created = false;
+
     try {
       if (pageId) {
         try {
-          await _notionUpdatePage(token, pageId, group, tabs.length, titleProp);
+          await _notionUpdatePage(token, pageId, group, count, titleProp);
         } catch (err) {
-          if (err && err.status === 404) { pageId = null; } // deleted in Notion → recreate
-          else throw err;
+          const isNotFound = err && (err.status === 404 || (err.message && err.message.includes('object_not_found')));
+          if (isNotFound) {
+            pageId = null; // deleted in Notion → recreate
+          } else {
+            throw err;
+          }
         }
       }
+
       if (!pageId) {
-        const page = await _notionCreatePage(token, dbId, group, tabs.length, titleProp);
+        // Create page with initial blocks (up to 100) in ONE request
+        const initialBlocks = blocks.slice(0, 100);
+        const page = await _notionCreatePage(token, dbId, group, count, titleProp, initialBlocks);
         pageId = page.id;
         created = true;
         map[group.id] = pageId;
         mapDirty = true;
       }
+
       if (created) {
-        // New page: nothing to compare against yet.
-        await _notionAppendTabs(token, pageId, tabs);
+        if (blocks.length > 100) {
+          await _notionAppendBlocks(token, pageId, blocks.slice(100));
+        }
       } else {
-        await _notionReplaceTabs(token, pageId, tabs);
+        await _notionReplaceContent(token, pageId, blocks);
       }
       synced++;
     } catch (err) {
+      failed++;
       if (!firstError) firstError = String((err && err.message) || err);
       console.warn('[TGM Notion] sync error for group:', group.name, err);
     }
@@ -960,8 +1621,15 @@ async function notionSyncAllGroups() {
     }
   }
 
-  if (synced === 0 && firstError) return { ok: false, error: firstError };
-  return { ok: true, count: synced };
+  if (synced === 0 && firstError) {
+    return { ok: false, error: firstError, count: 0, failed };
+  }
+  return {
+    ok: true,
+    count: synced,
+    failed,
+    firstError: failed > 0 ? firstError : null,
+  };
 }
 
 // Only push when the visible group data changed. Runtime fields this worker
@@ -969,11 +1637,16 @@ async function notionSyncAllGroups() {
 function _notionGroupSig(groups) {
   try {
     return JSON.stringify((groups || []).map(g => ({
-      id:    g && g.id,
-      name:  (g && g.name) || '',
-      color: (g && g.color) || '',
-      type:  (g && g.type) || '',
-      tabs:  (g && Array.isArray(g.tabs) ? g.tabs : []).map(t => [
+      id:          g && g.id,
+      name:        (g && g.name) || '',
+      color:       (g && g.color) || '',
+      type:        (g && g.type) || '',
+      noteMode:    (g && g.noteMode) || '',
+      textContent: (g && g.textContent) || '',
+      checklist:   (g && Array.isArray(g.checklist) ? g.checklist : []).map(c => [
+        (c && c.text) || '', !!(c && c.done),
+      ]),
+      tabs:        (g && Array.isArray(g.tabs) ? g.tabs : []).map(t => [
         (t && t.title) || '', (t && t.url) || '',
       ]),
     })));
