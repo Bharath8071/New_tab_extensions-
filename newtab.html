@@ -54,6 +54,7 @@
       --tile-hover: rgba(255, 255, 255, 0.10);
       --label-color: #e8eaed;
       --circle-bg: rgba(60, 64, 67, 0.85);
+      --sc-circle-bg: rgba(60, 64, 67, 0.85);
       --divider: rgba(255, 255, 255, 0.12);
       /* Stacking order (low → high). Autocomplete is portaled to body. */
       --layer-wallpaper: 0;
@@ -64,6 +65,19 @@
       --layer-modal: 9999;
       --layer-wp-editor: 10000;
       --layer-dnd-ghost: 10001;
+      /* Search bar + shortcut tile shadows (toggleable: full vs 25%) */
+      --sb-focus-shadow: 0 2px 18px rgba(0, 0, 0, .45);
+      --sc-circle-shadow: 0 4px 10px rgba(0, 0, 0, 0.5), inset 0 0 6px rgba(255, 255, 255, 0.05);
+      --sc-circle-hover-shadow: 0 4px 14px rgba(0, 0, 0, .4);
+      --sc-label-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+    }
+
+    /* Shadow effect OFF → 25% of the full-strength shadows (alpha × .25) */
+    body.shadows-soft {
+      --sb-focus-shadow: 0 2px 18px rgba(0, 0, 0, .11);
+      --sc-circle-shadow: 0 4px 10px rgba(0, 0, 0, 0.125), inset 0 0 6px rgba(255, 255, 255, 0.0125);
+      --sc-circle-hover-shadow: 0 4px 14px rgba(0, 0, 0, .1);
+      --sc-label-shadow: 0 1px 3px rgba(0, 0, 0, .14);
     }
 
     html {
@@ -168,7 +182,7 @@
 
     #search-bar:focus {
       background: rgba(32, 33, 36, 0.25);
-      box-shadow: 0 2px 18px rgba(0, 0, 0, .45)
+      box-shadow: var(--sb-focus-shadow);
     }
 
     /* ── Engine picker (badge + dropdown) ── */
@@ -346,20 +360,18 @@
       width: 48px;
       height: 48px;
       border-radius: 50%;
-      background: var(--circle-bg);
+      background: var(--sc-circle-bg);
       display: flex;
       align-items: center;
       justify-content: center;
       overflow: hidden;
       transition: transform .15s, box-shadow .15s;
-      box-shadow:
-        0 4px 10px rgba(0, 0, 0, 0.5),
-        inset 0 0 6px rgba(255, 255, 255, 0.05);
+      box-shadow: var(--sc-circle-shadow);
     }
 
     .sc-tile:hover .sc-circle {
       transform: scale(1.07);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, .4);
+      box-shadow: var(--sc-circle-hover-shadow);
     }
 
     .sc-circle img {
@@ -459,7 +471,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       max-width: 82px;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+      text-shadow: var(--sc-label-shadow);
     }
 
     /* Side panel: hide the names under the shortcut icons */
@@ -2909,6 +2921,10 @@
   </div>
 
   <div id="bg" style="background-color:#202124"></div>
+  <!-- Video wallpaper layer — shown only when __video__ marker is active -->
+  <video id="bg-video" autoplay loop muted playsinline
+    style="display:none;position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:var(--layer-wallpaper);pointer-events:none;opacity:0;transition:opacity 220ms cubic-bezier(0.22,1,0.36,1);"
+  ></video>
   <!-- <script>
 (function () {
   var DEFAULT = '#202124';
@@ -3033,9 +3049,9 @@
       <div class="cp-section-title">Wallpapers</div>
       <div class="cp-wallpapers" id="cp-wallpapers"></div>
       <button class="cp-upload-btn" id="cp-upload-btn">
-        ＋ Upload your own photo
+        ＋ Upload photo / video
       </button>
-      <input type="file" id="cp-file-input" accept="image/*" style="display:none" />
+      <input type="file" id="cp-file-input" accept="image/*,video/mp4,video/webm,video/ogg" style="display:none" />
       <button class="cp-upload-btn" id="cp-clear-wp"
         style="margin-top:6px; border-style:solid; border-color:rgba(255,255,255,.15)">
         ✕ Remove wallpaper
@@ -3081,9 +3097,13 @@
         <span class="cp-toggle-label">Show shortcuts</span>
         <button class="toggle on" id="toggle-shortcuts"></button>
       </div>
-      <div class="cp-toggle-row" style="margin-bottom:0">
+      <div class="cp-toggle-row">
         <span class="cp-toggle-label">Show tab groups bar</span>
         <button class="toggle on" id="toggle-tab-groups" title="Toggle Tab Groups Bar"></button>
+      </div>
+      <div class="cp-toggle-row" style="margin-bottom:0">
+        <span class="cp-toggle-label">Shadow effect</span>
+        <button class="toggle on" id="toggle-shadows" title="Search bar + shortcuts — ON: full shadows + grey tint, OFF: 25% shadows + 15% tint (bar focus: default tint)"></button>
       </div>
     </div>
 

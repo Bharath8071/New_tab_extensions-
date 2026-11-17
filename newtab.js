@@ -245,6 +245,40 @@ async function _idbDeleteGif() {
   });
 }
 
+// ── Video helpers ─────────────────────────────────────────
+async function _idbSaveVideo(arrayBuffer) {
+  const db = await _openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(NTP_IDB_STORE, 'readwrite');
+    tx.oncomplete = () => { resolve(); };
+    tx.onerror    = e => { reject(e.target.error); };
+    tx.objectStore(NTP_IDB_STORE).put(arrayBuffer, 'custom_video');
+  });
+}
+
+async function _idbLoadVideo() {
+  const db = await _openIDB();
+  return new Promise((resolve, reject) => {
+    let result = null;
+    const tx  = db.transaction(NTP_IDB_STORE, 'readonly');
+    tx.oncomplete = () => { resolve(result); };
+    tx.onerror   = e => { reject(e.target.error); };
+    const req = tx.objectStore(NTP_IDB_STORE).get('custom_video');
+    req.onsuccess = e => { result = e.target.result || null; };
+    req.onerror = e => { reject(e.target.error); };
+  });
+}
+
+async function _idbDeleteVideo() {
+  const db = await _openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(NTP_IDB_STORE, 'readwrite');
+    tx.oncomplete = () => { resolve(); };
+    tx.onerror    = e => { reject(e.target.error); };
+    tx.objectStore(NTP_IDB_STORE).delete('custom_video');
+  });
+}
+
 // ── LRU Wallpaper Cache (uploads + presets, strictly capped at 20) ──
 // Record shape: { id: string, blob: Blob, mimeType: string, size: number, timestamp: number }
 
@@ -410,25 +444,48 @@ async function _cacheRemoteWallpaper(url) {
 // state, so it paints synchronously in the SAME storage callback — zero extra
 // round-trips, zero IndexedDB open. Full-res blob swaps in when decoded.
 async function _makeThumbDataUrl(blob) {
+  const MAX_W = 320; // placeholder only: big enough for a smooth blur-up, tiny vs full-res
+  const drawToDataUrl = (src, sw, sh) => {
+    try {
+      const scale = Math.min(1, MAX_W / sw);
+      const w = Math.max(1, Math.round(sw * scale));
+      const h = Math.max(1, Math.round(sh * scale));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(src, 0, 0, w, h);
+      return new Promise(resolve => {
+        c.toBlob(b => {
+          if (!b) { resolve(null); return; }
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => resolve(null);
+          fr.readAsDataURL(b);
+        }, 'image/jpeg', 0.7);
+      });
+    } catch (_) { return null; }
+  };
+  // Primary: ImageBitmap decode (jpg/png/webp/avif…)
   try {
     const bmp = await createImageBitmap(blob);
-    const MAX_W = 320; // placeholder only: big enough for a smooth blur-up, tiny vs full-res
-    const scale = Math.min(1, MAX_W / bmp.width);
-    const w = Math.max(1, Math.round(bmp.width * scale));
-    const h = Math.max(1, Math.round(bmp.height * scale));
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const out = await drawToDataUrl(bmp, bmp.width, bmp.height);
     if (typeof bmp.close === 'function') bmp.close();
-    return new Promise(resolve => {
-      c.toBlob(b => {
-        if (!b) { resolve(null); return; }
-        const fr = new FileReader();
-        fr.onload = () => resolve(fr.result);
-        fr.onerror = () => resolve(null);
-        fr.readAsDataURL(b);
-      }, 'image/jpeg', 0.7);
-    });
+    if (out) return out;
+  } catch (_) {}
+  // Fallback: <img> decode — covers formats createImageBitmap can refuse
+  // (e.g. a GIF's first frame). Same-origin blob URL keeps the canvas clean.
+  try {
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('decode failed'));
+        i.src = url;
+      });
+      return await drawToDataUrl(img, img.naturalWidth, img.naturalHeight);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   } catch (_) { return null; }
 }
 
@@ -538,12 +595,19 @@ async function _applyGifFromIDB(opts = {}) {
     }
 
     // ── Fade out → swap image → fade back in (only when switching wallpapers) ──
-    // This gives a clean cross-fade instead of a hard pop
+    // This gives a clean cross-fade instead of a hard pop.
+    // Hide a playing video layer first — it sits ON TOP of #bg and would
+    // otherwise keep playing over the GIF (video → gif switch).
+    _hideVideoBg();
     bg.style.transition = 'opacity 200ms ease, transform 0s';
     bg.style.opacity = '0';
 
     // Wait for fade-out to complete
     await new Promise(resolve => setTimeout(resolve, 200));
+
+    // A newer wallpaper choice won while we were fading — never paint the old
+    // GIF over it (this was the "change applies only after refresh" bug)
+    if (_gen !== _wallpaperGen) return;
 
     // Paint the GIF
     _paintBgWithUrl(_activeBlobUrl);
@@ -567,10 +631,128 @@ async function _applyGifFromIDB(opts = {}) {
   }
 }
 
+// ── Video wallpaper helpers ───────────────────────────────
+let _videoBlobUrl = null; // tracks active video blob URL
+
+function _hideVideoBg() {
+  const v = document.getElementById('bg-video');
+  if (!v) return;
+  v.pause();
+  v.style.opacity = '0';
+  v.style.display = 'none';
+  v.src = '';
+  if (_videoBlobUrl) { URL.revokeObjectURL(_videoBlobUrl); _videoBlobUrl = null; }
+}
+
+// Grab the video's current frame as the blur-up thumb, so the next cold load
+// paints THIS video blurred in the gap — never the previous wallpaper.
+function _captureVideoThumb(v) {
+  try {
+    if (!v || !v.videoWidth || !v.videoHeight) return;
+    const MAX_W = 320; // matches _makeThumbDataUrl placeholder size
+    const scale = Math.min(1, MAX_W / v.videoWidth);
+    const w = Math.max(1, Math.round(v.videoWidth * scale));
+    const h = Math.max(1, Math.round(v.videoHeight * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(v, 0, 0, w, h);
+    _persistThumbDataUrl(c.toDataURL('image/jpeg', 0.7));
+  } catch (_) {}
+}
+
+async function _applyVideoFromIDB(opts = {}) {
+  const _gen = ++_wallpaperGen;
+  try {
+    const buffer = await _idbLoadVideo();
+    if (!buffer) {
+      if (_gen !== _wallpaperGen) return;
+      state.wallpaper = '';
+      saveState();
+      _hideVideoBg();
+      applyBg();
+      return;
+    }
+
+    // Revoke previous blob if any
+    if (_videoBlobUrl) { URL.revokeObjectURL(_videoBlobUrl); _videoBlobUrl = null; }
+
+    const type = _videoMimeFromBuffer(buffer) || 'video/mp4';
+    const blob = new Blob([buffer], { type });
+    _videoBlobUrl = URL.createObjectURL(blob);
+
+    const v = document.getElementById('bg-video');
+    if (!v) return;
+
+    // NOTE: #bg is intentionally NOT cleared here. Whatever it holds — the
+    // blurred first-frame thumb on first load, the previous wallpaper on a
+    // switch — stays visible UNDER the video's 220ms fade-in. Clearing it
+    // upfront is exactly what let a stale blurred thumb from the previous
+    // wallpaper flash through during that gap.
+    const bg = document.getElementById('bg');
+
+    const bv = 1.0 + (state.wpBrightness || 0) * 0.08;
+    v.style.filter = `brightness(${bv.toFixed(2)})`;
+
+    if (opts.isSwitch) {
+      // Cross-fade when switching
+      v.style.opacity = '0';
+      v.style.display = 'block';
+      v.src = _videoBlobUrl;
+      await v.play().catch(() => {});
+      // A newer wallpaper choice won while the video was starting — hide it
+      // instead of revealing it over that choice (the video sits ON TOP of #bg)
+      if (_gen !== _wallpaperGen) { _hideVideoBg(); return; }
+      requestAnimationFrame(() => { requestAnimationFrame(() => { v.style.opacity = '1'; }); });
+      // Fresh bytes → capture this video's first frame as the blur-up thumb
+      _captureVideoThumb(v);
+    } else {
+      // First load: just show immediately (body.loaded CSS handles opacity)
+      v.src = _videoBlobUrl;
+      v.style.display = 'block';
+      v.style.opacity = '1';
+      await v.play().catch(() => {});
+      if (_gen !== _wallpaperGen) { _hideVideoBg(); return; }
+      // Self-heal: videos uploaded before thumb capture never got a thumb
+      if (!localStorage.getItem('ntp_wp_thumb')) _captureVideoThumb(v);
+    }
+
+    // Video now covers the viewport — release the static placeholder after
+    // its fade-in completes. Gen-guarded: a newer switch may already own #bg.
+    const _genAtVideoApply = _gen;
+    setTimeout(() => {
+      if (_genAtVideoApply !== _wallpaperGen) return;
+      if (bg) { bg.style.backgroundImage = 'none'; bg.style.filter = 'none'; }
+    }, 260);
+  } catch (err) {
+    console.error('[NTP] Failed to load video from IndexedDB:', err);
+    if (_gen === _wallpaperGen) {
+      state.wallpaper = '';
+      saveState();
+      _hideVideoBg();
+      applyBg();
+    }
+  }
+}
+
+// Sniff the MIME type from the first 12 bytes of the ArrayBuffer
+function _videoMimeFromBuffer(buf) {
+  try {
+    const b = new Uint8Array(buf.slice(0, 12));
+    // MP4: ftyp box at offset 4
+    if (b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70) return 'video/mp4';
+    // WebM: EBML header 0x1A45DFA3
+    if (b[0]===0x1A&&b[1]===0x45&&b[2]===0xDF&&b[3]===0xA3) return 'video/webm';
+    // OGG: OggS
+    if (b[0]===0x4F&&b[1]===0x67&&b[2]===0x67&&b[3]===0x53) return 'video/ogg';
+  } catch (_) {}
+  return null;
+}
+
 // Revoke blob URLs when tab closes to free memory
 window.addEventListener('pagehide', () => {
   if (_activeBlobUrl)  URL.revokeObjectURL(_activeBlobUrl);
   if (_uploadBlobUrl)  URL.revokeObjectURL(_uploadBlobUrl);
+  if (_videoBlobUrl)   URL.revokeObjectURL(_videoBlobUrl);
 });
 
 // ═══════════════════════════════════════════════════════
@@ -582,6 +764,7 @@ let state = {
   showSearchBar:  true,
   showShortcutNames: true,
   lockShortcuts:  false,
+  showShadows:    true,
   searchEngine:  'google',
   bgColor:    '#202124',
   wallpaper:  DEFAULT_WALLPAPER,
@@ -676,6 +859,10 @@ function loadState(cb) {
       if (state.wallpaper === '__gif__') {
         // Wipe stale ntp_wallpaper so it can never poison a future load
         chrome.storage.local.remove('ntp_wallpaper');
+        // Correct blur-up placeholder, straight from chrome.storage: overrides
+        // any stale thumb the <head> fastpaint painted from this page's old
+        // localStorage mirror, and stays up until the GIF swaps in sharp.
+        if (r.ntp_wp_thumb) { _paintBgThumb(r.ntp_wp_thumb); _perfMark('thumb-inline'); }
         run(); // render UI immediately — don't block on GIF decode
         _applyGifFromIDB(); // fast first-load path: pre-decodes, no 200ms fade wait
         return;
@@ -697,6 +884,19 @@ function loadState(cb) {
           }
           else { state.wallpaper = ''; chrome.storage.local.remove('ntp_wp_thumb'); try { localStorage.removeItem('ntp_wp_thumb'); } catch (_) {} saveState(); applyBg(); }
         });
+        return;
+      }
+
+      // ── Video wallpaper (ArrayBuffer in IndexedDB) ──
+      if (state.wallpaper === '__video__') {
+        chrome.storage.local.remove('ntp_wallpaper');
+        // Correct blur-up placeholder (the video's own first frame once
+        // captured): overrides any stale thumb the <head> fastpaint painted
+        // from this page's old localStorage mirror, and stays visible under
+        // the video's fade-in.
+        if (r.ntp_wp_thumb) { _paintBgThumb(r.ntp_wp_thumb); _perfMark('thumb-inline'); }
+        run(); // render UI immediately — don't block on video decode
+        _applyVideoFromIDB(); // first-load path
         return;
       }
 
@@ -728,7 +928,8 @@ function loadState(cb) {
 function saveState() {
   const isGif           = state.wallpaper === '__gif__';
   const isUpload        = state.wallpaper === '__upload__';
-  const isMarker        = isGif || isUpload;
+  const isVideo         = state.wallpaper === '__video__';
+  const isMarker        = isGif || isUpload || isVideo;
   const isRealWallpaper = state.wallpaper && !isMarker;
 
   // Real wallpaper changes get a new stamp here (monotonic, so two changes in
@@ -928,12 +1129,24 @@ function applyBg(skipImage) {
   if (!state.wallpaper) {
     if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
     if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; }
+    _hideVideoBg(); // also stop any playing video
     bg.style.backgroundImage = 'none';
     bg.style.filter = 'none';
     // No wallpaper: clear any stale fast-paint thumb behind #bg too
     document.documentElement.style.backgroundImage = 'none';
     return;
   }
+
+  // Video: applied via blob URL by _applyVideoFromIDB — only update brightness here.
+  if (state.wallpaper === '__video__') {
+    const bv = 1.0 + (state.wpBrightness || 0) * 0.08;
+    const v = document.getElementById('bg-video');
+    if (v) v.style.filter = `brightness(${bv.toFixed(2)})`;
+    return;
+  }
+
+  // When switching TO a non-video wallpaper, hide the video layer
+  _hideVideoBg();
 
   // GIF: applied via blob URL by _applyGifFromIDB — only update brightness here.
   if (state.wallpaper === '__gif__') {
@@ -955,7 +1168,7 @@ function applyBg(skipImage) {
   // Blob markers are resolved async by their own loaders — never touch #bg
   // here and never paint the marker string as a URL (renders broken/black).
   // Leave #bg on the head fast-paint rule until the real image arrives.
-  if (state.wallpaper === '__gif__' || state.wallpaper === '__upload__') {
+  if (state.wallpaper === '__gif__' || state.wallpaper === '__upload__' || state.wallpaper === '__video__') {
     return;
   }
 
@@ -970,7 +1183,7 @@ function applyBg(skipImage) {
 function preloadWallpaper() {
   return new Promise(resolve => {
     // Skip for blob markers or empty — those are painted independently
-    if (!state.wallpaper || state.wallpaper === '__gif__' || state.wallpaper === '__upload__') {
+    if (!state.wallpaper || state.wallpaper === '__gif__' || state.wallpaper === '__upload__' || state.wallpaper === '__video__') {
       resolve(); return;
     }
     let settled = false;
@@ -1273,6 +1486,9 @@ searchBarStyle.textContent = `#search-bar:focus{background:rgba(32,33,36,${UI_AL
 document.head.appendChild(searchBarStyle);
 
 document.documentElement.style.setProperty('--circle-bg', `rgba(60,64,67,${UI_ALPHA})`);
+// Shortcut circles get their own var so the Shadow-effect toggle can clear
+// them without touching the Customize button (which stays on --circle-bg).
+document.documentElement.style.setProperty('--sc-circle-bg', `rgba(60,64,67,${UI_ALPHA})`);
 
 const mainEl = document.getElementById('main');
 const logoEl = document.getElementById('logo');
@@ -2353,6 +2569,29 @@ document.getElementById('toggle-lock-shortcuts').onclick = function() {
   renderShortcuts(); // the "+" add tile follows the lock
 };
 
+// ─── Shadow Effect (search bar + shortcut tiles) ───
+// ON → full-strength shadows + the UI_ALPHA grey tint (as before).
+// OFF → 25% intensity shadows AND a fainter 15% grey tint; clicking the
+// search bar brings the tint up to the default (UI_ALPHA) while focused,
+// and it settles back on blur.
+function syncShadows() {
+  const on = state.showShadows !== false; // default is true
+  document.body.classList.toggle('shadows-soft', !on);
+  // Resting tint: ON → default UI_ALPHA glass; OFF → 15% grey.
+  const restA = on ? UI_ALPHA : 0.15;
+  if (searchBar) searchBar.style.background = `rgba(32,33,36,${restA})`;
+  // Focus (clicked) tint is always the default — even in the OFF state.
+  searchBarStyle.textContent = `#search-bar:focus{background:rgba(32,33,36,${UI_ALPHA}) !important;}`;
+  document.documentElement.style.setProperty('--sc-circle-bg', `rgba(60,64,67,${restA})`);
+  const t = document.getElementById('toggle-shadows');
+  if (t) t.className = 'toggle' + (on ? ' on' : '');
+}
+document.getElementById('toggle-shadows').onclick = function() {
+  state.showShadows = state.showShadows === false; // true/undefined → false, false → true
+  saveState();
+  syncShadows();
+};
+
 const colorsEl = document.getElementById('cp-colors');
 // ── Lazy panel content: swatches + 9 remote thumbnails are built on FIRST
 // panel open (rAF after the slide starts), not at page load. This keeps the
@@ -2397,6 +2636,9 @@ WALLPAPERS.forEach(({ label, url, thumb }) => {
   tile.onclick = async () => {
     if (tile.classList.contains('cp-wp-loading')) return; // already working
     tile.classList.add('cp-wp-loading');
+    // Cancel any in-flight GIF/video loader: they paint late (after async
+    // waits) and would otherwise repaint the old media over this choice
+    _wallpaperGen++;
     // Fix #08: prove the image loads BEFORE committing anything. The old flow
     // saved state.wallpaper/bgColor first, so a failed load (offline, bad URL)
     // persisted a black background with a dead URL across reloads — and the
@@ -2419,6 +2661,10 @@ WALLPAPERS.forEach(({ label, url, thumb }) => {
 
       if (ok) {
         // ── Commit only now: swap blob ownership, persist, then paint ──
+        // Stop a playing video layer and release an old GIF blob — the video
+        // sits ON TOP of #bg and would keep playing over this wallpaper
+        _hideVideoBg();
+        if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; }
         // Clear any upload blob URL so the remote URL paints correctly
         if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
         if (candidateBlobUrl) { _uploadBlobUrl = candidateBlobUrl; candidateBlobUrl = null; }
@@ -2466,7 +2712,7 @@ function syncCustomPanelActive() {
     s.classList.toggle('active', !state.wallpaper && cv === state.bgColor);
   });
   document.querySelectorAll('.cp-wp').forEach(w => w.classList.remove('active'));
-  if (state.wallpaper && state.wallpaper !== '__gif__' && state.wallpaper !== '__upload__') {
+  if (state.wallpaper && state.wallpaper !== '__gif__' && state.wallpaper !== '__upload__' && state.wallpaper !== '__video__') {
     const tiles = document.querySelectorAll('#cp-wallpapers .cp-wp');
     WALLPAPERS.forEach(({ url }, i) => {
       if (url === state.wallpaper && tiles[i]) tiles[i].classList.add('active');
@@ -2487,12 +2733,15 @@ document.getElementById('cp-clear-wp').onclick = () => {
     URL.revokeObjectURL(_activeBlobUrl);
     _activeBlobUrl = null;
   }
+  // Stop & hide video layer
+  _hideVideoBg();
   // Reset bg element now (before applyBg, in case it still holds the blob URL)
   const bg = document.getElementById('bg');
   bg.style.backgroundImage = 'none';
   bg.style.filter = 'none';
-  // Delete GIF from IndexedDB
+  // Delete GIF and Video from IndexedDB
   _idbDeleteGif().catch(() => {});
+  _idbDeleteVideo().catch(() => {});
   _cacheDelete('custom_upload').catch(() => {});
   chrome.storage.local.remove('ntp_wp_thumb');
   try { localStorage.removeItem('ntp_wp_thumb'); } catch (_) {}
@@ -2546,6 +2795,7 @@ loadState(async () => {
   // longer be skipped — one failing call must never leave a blank new tab.
   try { applyBg(true); } catch (e) { console.error('[NTP] applyBg failed:', e); }
   try { syncToggles(); } catch (e) { console.error('[NTP] syncToggles failed:', e); }
+  try { syncShadows(); } catch (e) { console.error('[NTP] syncShadows failed:', e); }
   try { syncSearchBarVisibility(); } catch (e) { console.error('[NTP] syncSearchBarVisibility failed:', e); }
   // Coupled rule: search bar OFF → shortcuts OFF (normalize any legacy state)
   if (state.showSearchBar === false && state.showShortcuts !== false) {
@@ -2566,7 +2816,7 @@ loadState(async () => {
 
   // Remote preset URLs: serve from IndexedDB blob cache if present (no network),
   // else preload via browser image cache, then cache in background for next time.
-  const isBlob   = state.wallpaper === '__gif__' || state.wallpaper === '__upload__';
+  const isBlob   = state.wallpaper === '__gif__' || state.wallpaper === '__upload__' || state.wallpaper === '__video__';
   const isRemote = !isBlob && state.wallpaper && !state.wallpaper.startsWith('data:');
 
   if (isRemote) {
@@ -2685,21 +2935,55 @@ loadState(async () => {
     }
 
     if (!file || !(file instanceof Blob)) {
-      _showToast('⚠️ Please select a valid image file.');
+      _showToast('⚠️ Please select a valid image or video file.');
       return;
     }
 
     _isGif = file.type === 'image/gif';
+    const _isVideo = file.type.startsWith('video/');
 
     // Size validation: the 25MB cap applies to static images only.
-    // GIFs are exempt (no max) — only the empty/corrupted guard applies.
-    if (!_isGif && file.size > MAX_WALLPAPER_BYTES) {
+    // GIFs and videos are exempt (no max) — only the empty/corrupted guard applies.
+    if (!_isGif && !_isVideo && file.size > MAX_WALLPAPER_BYTES) {
       _showToast(`⚠️ Image is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Max limit is 25MB.`);
       return;
     }
     if (file.size < MIN_WALLPAPER_BYTES) {
-      _showToast('⚠️ Image file is empty or corrupted.');
+      _showToast('⚠️ File is empty or corrupted.');
       return;
+    }
+
+    // ── Video: skip crop editor, save to IDB, apply looping video ──
+    if (_isVideo) {
+      _showToast('Saving video wallpaper…');
+      const vidSaveGen = _editorGen;
+      const arrReader = new FileReader();
+      arrReader.onload = async e => {
+        if (vidSaveGen !== _editorGen) return;
+        const arrayBuffer = e.target.result;
+        try {
+          await _idbSaveVideo(arrayBuffer);
+          // Also clear any old GIF/image so only video plays
+          _idbDeleteGif().catch(() => {});
+          _cacheDelete('custom_upload').catch(() => {});
+          if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; }
+          if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+          state.wallpaper = '__video__';
+          _bumpWallpaperStamp();
+          saveState();
+          await _applyVideoFromIDB({ isSwitch: true });
+          _showToast('✅ Video wallpaper set!');
+        } catch (err) {
+          console.error('[NTP] Video save failed:', err);
+          _showToast('❌ Failed to save video: ' + (err.message || 'database error'));
+        }
+      };
+      arrReader.onerror = () => {
+        console.error('[NTP] Video FileReader error');
+        _showToast('❌ Failed to read video file. Please try again.');
+      };
+      arrReader.readAsArrayBuffer(file);
+      return; // skip editor entirely
     }
 
     if (_isGif) {
@@ -3093,10 +3377,15 @@ loadState(async () => {
       await _cachePut('custom_upload', blob, blob.type || 'image/png');
       _saveThumbForUpload(blob); // instant placeholder for next new-tab
 
-      // Apply immediately via blob URL (blur-up over the old wallpaper)
+      // Apply immediately via blob URL (blur-up over the old wallpaper).
+      // Cancel any in-flight GIF/video loader and stop a playing video —
+      // both would otherwise keep showing over the new upload.
+      _wallpaperGen++;
       if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
       _uploadBlobUrl = URL.createObjectURL(blob);
       await _predecode(_uploadBlobUrl);
+      _hideVideoBg();
+      if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; }
       _paintBgSharp(_uploadBlobUrl);
 
       // Set state to upload marker (no huge dataURL in chrome.storage)
@@ -6287,7 +6576,7 @@ function _scheduleWallpaperReconcile() {
     if (!r || !r.ntp_state) return;
     if (state.wallpaper !== seen) return;          // changed on THIS page meanwhile: that choice wins
     const marker = r.ntp_state.wallpaper;
-    const target = (marker === '__gif__' || marker === '__upload__')
+    const target = (marker === '__gif__' || marker === '__upload__' || marker === '__video__')
       ? marker
       : (r.ntp_wallpaper || (typeof marker === 'string' ? marker : ''));
     // A new stamp means the wallpaper was replaced even if the marker/URL is
@@ -6316,11 +6605,21 @@ async function _applyWallpaperFromOutside(target, stamp) {
   // animated GIF: bytes live in the shared IndexedDB
   if (target === '__gif__') {
     if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+    _hideVideoBg();
     await _applyGifFromIDB({ isSwitch: true });
     return;
   }
 
-  // everything below paints a still image: release a previous GIF blob
+  // looping video: bytes live in the shared IndexedDB
+  if (target === '__video__') {
+    if (_uploadBlobUrl) { URL.revokeObjectURL(_uploadBlobUrl); _uploadBlobUrl = null; }
+    if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; }
+    await _applyVideoFromIDB({ isSwitch: true });
+    return;
+  }
+
+  // everything below paints a still image: release previous GIF/video blobs
+  _hideVideoBg();
   const dropGif = () => { if (_activeBlobUrl) { URL.revokeObjectURL(_activeBlobUrl); _activeBlobUrl = null; } };
 
   // uploaded image: blob lives in the shared IndexedDB cache
@@ -6443,6 +6742,12 @@ function _extSyncFromEvent(changes) {
       renderShortcuts(); // the "+" add tile follows the lock
     }
 
+    // shadow effect (search bar + shortcut tiles)
+    if (typeof nv.showShadows === 'boolean' && changed('showShadows')) {
+      state.showShadows = nv.showShadows;
+      syncShadows();
+    }
+
     // search engine (badge + query routing)
     if (typeof nv.searchEngine === 'string' && changed('searchEngine')) {
       state.searchEngine = SEARCH_ENGINES[nv.searchEngine] ? nv.searchEngine : 'google';
@@ -6466,6 +6771,21 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.ntp_state && !changes.ntp_state.newValue && changes.ntp_state.oldValue) {
     try { if (typeof location !== 'undefined' && location.reload) location.reload(); } catch (_) {}
     return;
+  }
+
+  // Keep this page's fast-paint thumb mirror fresh for the NEXT cold load.
+  // Only the page that saved the wallpaper updates its own localStorage, so
+  // every other open page would otherwise fastpaint a stale blurred thumb
+  // from the previous wallpaper at the beginning (uploads / GIFs / videos).
+  if (changes.ntp_wp_thumb) {
+    const tv = changes.ntp_wp_thumb.newValue;
+    try {
+      if (typeof tv === 'string' && tv.indexOf('data:image') === 0) {
+        localStorage.setItem('ntp_wp_thumb', tv);
+      } else {
+        localStorage.removeItem('ntp_wp_thumb');
+      }
+    } catch (_) {}
   }
 
   // Live sync of everything except tabGroups (must run BEFORE the tabGroups
